@@ -2,13 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import styles from "./page.module.css";
+import GeneratedWorlds from "./generated-worlds";
 import LiveMonitoring from "./live-monitoring";
 import WorldMap from "./world-map";
-import { GridIcon, MapIcon, SearchIcon } from "./icons";
+import { GridIcon, MapIcon, SearchIcon, WorldsIcon } from "./icons";
 
 const TABS = [
   { id: "feeds", label: "Camera feeds", title: "Live Monitoring", Icon: GridIcon },
   { id: "map", label: "World map", title: "World Map", Icon: MapIcon },
+  { id: "worlds", label: "Generated worlds", title: "Generated Worlds", Icon: WorldsIcon },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -74,8 +76,10 @@ export default function Dashboard() {
         >
           {id === "feeds" ? (
             <LiveMonitoring request={request} />
-          ) : (
+          ) : id === "map" ? (
             <WorldMap active={tab === "map"} onOpenDroneFeed={openDroneFeed} />
+          ) : (
+            <GeneratedWorlds active={tab === "worlds"} />
           )}
         </div>
       ))}

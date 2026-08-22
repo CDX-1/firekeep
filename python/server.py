@@ -9,8 +9,14 @@ world, serves the results.
 The mod POSTs raw PNG bytes:
 
     POST /capture            body: image bytes
-                             optional: ?model=&prompt=&pano=1
+                             optional: ?backend=marble|wildfire&model=&prompt=&pano=1
       -> 202 {"job_id": "...", "status": "queued"}
+
+Two backends can turn that screenshot into a world. `wildfire`, the default,
+hands the shot to the n8n workflow, which captions it, writes its own prompt
+and calls World Labs itself - see wildfire.py. `marble` is the older path: this
+server calling the Marble API directly with the key in .env, on the model you
+picked. Nothing calls Marble unless a capture, or --backend, asks for it.
 
     GET  /api/jobs           every job, newest first
     GET  /api/jobs/<id>      one job, including the full world payload
@@ -49,6 +55,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 import cameras
 import live
 import marble
+import wildfire
 import worldmap
 
 HERE = Path(__file__).resolve().parent
@@ -67,6 +74,21 @@ WORLD_BY_DIM = {}               # dimension -> {meta, png, stamp}
 
 # auto-triggered generation should be cheap by default; override with --model
 DEFAULT_MODEL = "marble-1.0-draft"
+BACKENDS = ("marble", "wildfire")
+
+# n8n owns the generation: it captions the shot, writes the prompt and calls
+# World Labs with its own key. Nothing here talks to the Marble API unless a
+# capture asks for it by name.
+DEFAULT_BACKEND = "wildfire"
+
+# /api/health is polled by the dashboard, and only the marble backend has a
+# balance to report - so the one API call it needs is kept behind a cache
+CREDITS_TTL = 60
+CREDITS_CACHE = {"at": 0.0, "value": None}
+
+# --dry-run: captures are accepted and echoed back, nothing is ever generated.
+# Not the same as "no API key" - a wildfire job never needs one.
+DRY_RUN = False
 
 
 def now():
@@ -113,15 +135,24 @@ def load_jobs():
     print(f"loaded {len(JOBS_BY_ID)} previous job(s)")
 
 
-def submit(image_bytes, extension, *, model, prompt, is_pano, source):
+def submit(image_bytes, extension, *, model, prompt, is_pano, source, backend=DEFAULT_BACKEND):
     job_id = uuid.uuid4().hex[:12]
     d = job_dir(job_id)
     d.mkdir(parents=True, exist_ok=True)
     (d / f"source{extension}").write_bytes(image_bytes)
 
+    if backend == "wildfire":
+        # the workflow picks the model and captions the screenshot itself, so
+        # neither of ours would be honoured; recording them would be a lie
+        model, prompt = "n8n:minecraft-wildfire", None
+        credits = wildfire.CREDITS
+    else:
+        credits = marble.MODELS[model] + (0 if is_pano else marble.PANO_STEP)
+
     job = {
         "id": job_id,
         "status": "queued",
+        "backend": backend,
         "created": now(),
         "updated": now(),
         "model": model,
@@ -130,10 +161,12 @@ def submit(image_bytes, extension, *, model, prompt, is_pano, source):
         "source": source,
         "source_file": f"source{extension}",
         "bytes": len(image_bytes),
-        "estimated_credits": marble.MODELS[model] + (0 if is_pano else marble.PANO_STEP),
+        "estimated_credits": credits,
         "progress": None,
         "world_id": None,
         "marble_url": None,
+        "world_url": None,
+        "generated_prompt": None,
         "assets": {},
         "result_png": None,
         "error": None,
@@ -142,7 +175,7 @@ def submit(image_bytes, extension, *, model, prompt, is_pano, source):
         JOBS_BY_ID[job_id] = job
     save_job(job)
     WORK.put(job_id)
-    print(f"[{job_id}] queued  <- {source} ({len(image_bytes)/1e6:.1f} MB, {model})")
+    print(f"[{job_id}] queued  <- {source} ({len(image_bytes)/1e6:.1f} MB, {backend}/{model})")
     return job
 
 
@@ -172,6 +205,20 @@ def publish_result(job, saved):
     return str(dest)
 
 
+def credit_balance(server):
+    """The Marble balance, at most once a minute however often health is polled."""
+    if server.key is None:
+        return 0
+    if time.time() - CREDITS_CACHE["at"] < CREDITS_TTL:
+        return CREDITS_CACHE["value"]
+    try:
+        CREDITS_CACHE["value"] = marble.credits(server.key)
+    except marble.MarbleError as e:
+        CREDITS_CACHE["value"] = f"unavailable: {e}"
+    CREDITS_CACHE["at"] = time.time()
+    return CREDITS_CACHE["value"]
+
+
 def worker(key):
     while True:
         job_id = WORK.get()
@@ -191,7 +238,7 @@ def run_job(job_id, key):
     img = (d / job["source_file"]).read_bytes()
 
     update(job_id, status="generating")
-    if key is None:                                  # --dry-run
+    if DRY_RUN:
         print(f"[{job_id}] dry run, no API call")
         for pct in (25, 60, 100):
             time.sleep(0.6)
@@ -204,6 +251,13 @@ def run_job(job_id, key):
                assets={}, result_png=result, took_seconds=1.8,
                caption="(dry run - the screenshot was echoed back, nothing was generated)")
         return
+
+    if job.get("backend") == "wildfire":
+        return run_wildfire(job_id, job, d, img)
+
+    if key is None:
+        raise marble.MarbleError("no WORLDLABS_API_KEY - this job needed one "
+                                 "(POST /capture?backend=wildfire does not)")
 
     print(f"[{job_id}] generating ({job['model']})")
     t0 = time.time()
@@ -228,10 +282,42 @@ def run_job(job_id, key):
     print(f"[{job_id}] done in {time.time()-t0:.0f}s -> {result or world.get('world_marble_url')}")
 
 
+def run_wildfire(job_id, job, d, img):
+    """Hand the screenshot to the n8n workflow and wait for it to come back.
+
+    No key and no prompt on this side: n8n captions the screenshot, writes the
+    prompt and pays World Labs itself. What we keep is the prompt it wrote, so
+    the dashboard can show what the picture was actually asked for.
+    """
+    print(f"[{job_id}] generating (n8n wildfire)")
+    t0 = time.time()
+
+    started = wildfire.start(img, Path(job["source_file"]).suffix)
+    update(job_id, operation_id=started["operation_id"], status_url=started["status_url"],
+           prompt=started["prompt"], generated_prompt=started["prompt"], progress=5)
+    if started["prompt"]:
+        print(f"[{job_id}] prompt: {started['prompt'][:120]}")
+
+    payload = wildfire.wait(started["status_url"],
+                            on_progress=lambda p: update(job_id, progress=p))
+    saved = wildfire.save_assets(payload, d)
+    (d / "world.json").write_text(json.dumps(payload, indent=2))
+
+    result = publish_result(job, saved)
+    assets = payload.get("assets") if isinstance(payload.get("assets"), dict) else {}
+    world_url = payload.get("world_url")
+
+    update(job_id, status="done", progress=100, world_id=payload.get("world_id"),
+           world_url=world_url, marble_url=world_url, assets=saved, result_png=result,
+           caption=assets.get("caption") or payload.get("caption"),
+           took_seconds=round(time.time() - t0, 1))
+    print(f"[{job_id}] done in {time.time()-t0:.0f}s -> {result or world_url}")
+
+
 # --------------------------------------------------------------------------
 # screenshot folder watcher
 
-def watch_dirs(dirs, model, prompt, interval=2.0):
+def watch_dirs(dirs, model, prompt, backend=DEFAULT_BACKEND, interval=2.0):
     seen = {p for d in dirs for p in d.glob("*.png")}
     print(f"watching {len(dirs)} folder(s), {len(seen)} existing shot(s) ignored")
     while True:
@@ -244,7 +330,7 @@ def watch_dirs(dirs, model, prompt, interval=2.0):
                 time.sleep(0.4)                      # let the write finish
                 try:
                     submit(p.read_bytes(), ".png", model=model, prompt=prompt,
-                           is_pano=False, source=f"watch:{p.name}")
+                           backend=backend, is_pano=False, source=f"watch:{p.name}")
                 except Exception as e:
                     print(f"! could not submit {p.name}: {e}")
 
@@ -379,19 +465,27 @@ class Handler(BaseHTTPRequestHandler):
 
         q = parse_qs(url.query)
         one = lambda k, d=None: (q.get(k) or [d])[0]
+        backend = one("backend", self.server.backend)
+        if backend not in BACKENDS:
+            return self.send_json({"error": f"unknown backend {backend}",
+                                   "backends": list(BACKENDS)}, HTTPStatus.BAD_REQUEST)
+
+        # wildfire ignores the model - n8n picks its own - so only marble's is checked
         model = one("model", self.server.model)
-        if model not in marble.MODELS:
+        if backend == "marble" and model not in marble.MODELS:
             return self.send_json({"error": f"unknown model {model}",
                                    "models": list(marble.MODELS)}, HTTPStatus.BAD_REQUEST)
 
         job = submit(
             data, ".png" if data.startswith(b"\x89PNG") else ".jpg",
+            backend=backend,
             model=model,
             prompt=one("prompt", self.server.prompt),
             is_pano=one("pano", "") in ("1", "true", "yes"),
             source=one("source", self.headers.get("X-Source", "post")),
         )
         self.send_json({"job_id": job["id"], "status": job["status"],
+                        "backend": job["backend"],
                         "estimated_credits": job["estimated_credits"],
                         "url": f"/api/jobs/{job['id']}"}, HTTPStatus.ACCEPTED)
 
@@ -531,17 +625,16 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         if path == "/api/health":
-            try:
-                bal = 0 if self.server.key is None else marble.credits(self.server.key)
-            except marble.MarbleError as e:
-                bal = f"unavailable: {e}"
+            bal = credit_balance(self.server) if self.server.backend == "marble" else None
             with JOBS_LOCK:
                 busy = sum(1 for j in JOBS_BY_ID.values() if j["status"] == "generating")
             feed = live.snapshot()
             return self.send_json({"ok": True, "credits": bal,
                                    "queued": WORK.qsize(), "busy": busy,
                                    "model": self.server.model,
-                                   "dry_run": self.server.key is None,
+                                   "backend": self.server.backend,
+                                   "backends": list(BACKENDS),
+                                   "dry_run": DRY_RUN,
                                    "live": feed["live"], "watchers": live.subscriber_count(),
                                    "cameras": cameras.status()})
 
@@ -671,7 +764,12 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="bind address (default: localhost only)")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--model", default=DEFAULT_MODEL, choices=list(marble.MODELS),
-                    help=f"default model for incoming captures (default: {DEFAULT_MODEL})")
+                    help=f"model for --backend marble captures; wildfire picks its own "
+                         f"(default: {DEFAULT_MODEL})")
+    ap.add_argument("--backend", default=DEFAULT_BACKEND, choices=list(BACKENDS),
+                    help="who generates the world: wildfire posts to the n8n workflow, "
+                         "marble calls World Labs from here with the key in .env "
+                         f"(default: {DEFAULT_BACKEND})")
     ap.add_argument("--prompt", default=marble.DEFAULT_PROMPT)
     ap.add_argument("--watch", action="store_true",
                     help="also auto-submit new Minecraft screenshots as they appear")
@@ -688,7 +786,19 @@ def main():
     # keep logs live when stdout is a file or a pipe
     sys.stdout.reconfigure(line_buffering=True)
 
-    key = None if args.dry_run else marble.api_key()
+    global DRY_RUN
+    DRY_RUN = args.dry_run
+
+    # only the marble backend needs a key, so a wildfire-only server may start without one
+    key = None
+    if not args.dry_run:
+        try:
+            key = marble.api_key()
+        except marble.MarbleError:
+            if args.backend != "wildfire":
+                raise
+            print("! no WORLDLABS_API_KEY - fine for wildfire, but ?backend=marble will fail")
+
     JOBS.mkdir(parents=True, exist_ok=True)
     load_jobs()
 
@@ -705,16 +815,21 @@ def main():
         if not dirs:
             print("! --watch: no screenshot folders found")
         else:
-            threading.Thread(target=watch_dirs, args=(dirs, args.model, args.prompt),
+            threading.Thread(target=watch_dirs, args=(dirs, args.model, args.prompt, args.backend),
                              daemon=True).start()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.key, httpd.model, httpd.prompt = key, args.model, args.prompt
+    httpd.backend = args.backend
     httpd.save = worldmap.find_save(args.save)
 
     print(f"\nfirekeep capture server  http://{args.host}:{args.port}")
-    if key is None:
+    if DRY_RUN:
         print("  DRY RUN - captures are accepted but nothing is generated")
+    elif args.backend == "wildfire":
+        print(f"  backend wildfire -> {wildfire.BASE}")
+        print("          n8n writes the prompt and calls World Labs itself;")
+        print("          nothing here touches the Marble API unless a capture asks for it")
     else:
         print(f"  model   {args.model} (~{marble.MODELS[args.model] + marble.PANO_STEP} credits/capture)")
         print(f"  credits {marble.credits(key):.0f}")

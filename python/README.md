@@ -1,8 +1,8 @@
 # firekeep — minecraft → real
 
-A server that waits for a Minecraft screenshot, turns it into a photorealistic
-world with [World Labs' Marble](https://marble.worldlabs.ai), and serves the
-results over a small JSON API.
+A server that waits for a Minecraft screenshot, hands it to the n8n
+`minecraft-wildfire` workflow to be turned into a photorealistic world, and
+serves the results over a small JSON API.
 
 ## Run it
 
@@ -12,18 +12,36 @@ results over a small JSON API.
 ./server.py --dry-run       # accepts captures, never calls the API, costs nothing
 ```
 
-Stdlib only — nothing to install. The key comes from `.env`:
+Stdlib only — nothing to install, and no key needed: n8n holds the World Labs
+credentials. `.env` is only read by the older `marble` backend and by `main.py`:
 
 ```
 WORLDLABS_API_KEY=...
 ```
 
+### Two backends
+
+| backend | who does the work |
+|---|---|
+| `wildfire` (default) | POSTs the screenshot to the n8n `minecraft-wildfire` workflow, which captions the shot, writes its own prompt, and calls World Labs itself |
+| `marble` | this server calling the Marble API directly with the key above, on the model you picked |
+
+Wildfire is the default, so a `/screenshot` in game goes to n8n and this server
+never touches the World Labs API. `--model` and `--prompt` are ignored on that
+path — n8n picks both — and the prompt it wrote comes back on the job as
+`generated_prompt`.
+
+The direct path is still there when you want it: `--backend marble`, or
+`POST /capture?backend=marble` for one capture. That one needs the key, spends
+credits, and honours `--model`/`--prompt`.
+
 Everything else reaches Minecraft through this server, which is the only process that talks
-to both sides. The dashboard calls it and nothing else; it calls the Marble API, reads the
-save off disk, takes the mod's world feed, and pulls the drone cameras off the agents:
+to both sides. The dashboard calls it and nothing else; it generates the world (via n8n or
+the Marble API), reads the save off disk, takes the mod's world feed, and pulls the drone
+cameras off the agents:
 
 ```
-browser ──▶ dashboard (proxy only) ──▶ server.py ──┬─▶ Marble API
+browser ──▶ dashboard (proxy only) ──▶ server.py ──┬─▶ n8n / Marble API
                                                    ├─▶ the save's region files
                                                    ├─▶ the mod's world feed  (it POSTs here)
                                                    └─▶ the camera agents      :8087, :8088+
@@ -44,7 +62,8 @@ Wiring up the mod? Run with `--dry-run` and hammer it as hard as you like.
 |---|---|
 | `--port 8000` | |
 | `--host 127.0.0.1` | localhost only by default |
-| `--model marble-1.0-draft` | default for incoming captures |
+| `--backend wildfire` | who generates: `wildfire` (n8n) or `marble` (direct) |
+| `--model marble-1.0-draft` | model for `--backend marble`; wildfire picks its own |
 | `--watch` | auto-submit new screenshots from every Minecraft install found |
 | `--watch-dir DIR` | watch an extra folder (repeatable) |
 | `--workers 1` | concurrent generations |
@@ -92,7 +111,7 @@ curl -X POST --data-binary @shot.png localhost:8000/capture
   "estimated_credits": 230, "url": "/api/jobs/ae8bf450df99" }
 ```
 
-Optional query params: `?model=`, `?prompt=`, `?pano=1`, `?source=`.
+Optional query params: `?backend=`, `?model=`, `?prompt=`, `?pano=1`, `?source=`.
 Set `X-Source: <name>` to label where a capture came from.
 
 From Java:
@@ -111,7 +130,7 @@ Every job, newest first. Poll this for a dashboard.
 
 ```json
 [{ "id": "ae8bf450df99", "status": "done", "progress": 100,
-   "model": "marble-1.0-draft", "source": "firekeep-mod",
+   "backend": "marble", "model": "marble-1.0-draft", "source": "firekeep-mod",
    "created": "2026-08-21T20:48:11+00:00", "took_seconds": 54.4,
    "world_id": "33ce9cb2-...", "marble_url": "https://marble.worldlabs.ai/world/...",
    "assets": { "preview": "preview.jpg", "pano": "pano.png" },
@@ -120,13 +139,21 @@ Every job, newest first. Poll this for a dashboard.
 
 `status` is `queued` → `generating` → `done`, or `failed` with `error` set.
 
+A wildfire job looks the same, with `backend: "wildfire"`, `world_url` instead
+of a Marble URL, `generated_prompt` set to whatever n8n wrote, and
+`estimated_credits: 0` — the workflow is not spending our credits.
+
 ### `GET /api/jobs/<id>`
 
 One job, plus the full Marble `world` payload (mesh, splat and pano URLs).
 
 ### `GET /api/health`
 
-`{ ok, credits, queued, busy, model, dry_run }`
+`{ ok, credits, queued, busy, model, backend, backends, dry_run, live, watchers, cameras }`
+
+`credits` is `null` on a wildfire server — the balance being spent is not ours.
+On a marble server it is the Marble balance, cached for a minute so a polling
+dashboard does not turn into a stream of API calls.
 
 ### `GET /jobs/<id>/<file>`
 
@@ -400,6 +427,7 @@ Writes into the same `out/jobs/<id>/` layout.
 | | |
 |---|---|
 | `marble.py` | World Labs API client |
+| `wildfire.py` | client for the n8n `minecraft-wildfire` workflow |
 | `server.py` | capture server: queue, workers, JSON API, folder watcher |
 | `main.py` | one-shot CLI |
 | `worldmap.py` | renders a save's region files into a top-down PNG (also a CLI) |

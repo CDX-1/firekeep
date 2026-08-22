@@ -29,13 +29,20 @@ export interface DroneCamera {
 
 export type JobStatus = "queued" | "generating" | "done" | "failed";
 
+/** Who turns the screenshot into a world: World Labs directly, or the n8n workflow. */
+export const BACKENDS = ["marble", "wildfire"] as const;
+export type Backend = (typeof BACKENDS)[number];
+
 export interface Job {
   id: string;
   status: JobStatus;
+  /** absent on jobs captured before the wildfire backend existed - those are all marble */
+  backend?: Backend;
   created: string;
   updated: string;
   model: string;
-  prompt: string;
+  /** null on a wildfire job until n8n reports the prompt it wrote itself */
+  prompt: string | null;
   is_pano: boolean;
   /** where the capture came from, e.g. "firekeep-mod" or "watch:shot.png" */
   source: string;
@@ -45,7 +52,11 @@ export interface Job {
   progress: number | null;
   world_id: string | null;
   marble_url: string | null;
-  assets: { preview?: string; pano?: string };
+  /** wildfire only: the finished world, and the prompt n8n captioned the screenshot with */
+  world_url?: string | null;
+  generated_prompt?: string | null;
+  /** file names inside the job folder; the shape of a wildfire payload is not ours to fix */
+  assets: { preview?: string; pano?: string } & Record<string, string | undefined>;
   caption?: string | null;
   error: string | null;
   took_seconds?: number | null;
@@ -67,10 +78,13 @@ export interface MarbleWorld {
 
 export interface Health {
   ok: boolean;
-  credits: number | string;
+  /** null on a wildfire server - the credits being spent are n8n's, not ours */
+  credits: number | string | null;
   queued: number;
   busy: number;
   model: string;
+  backend: Backend;
+  backends: Backend[];
   dry_run: boolean;
 }
 
