@@ -23,8 +23,8 @@ picked. Nothing calls Marble unless a capture, or --backend, asks for it.
 
     POST /api/drones/spawn   put a new drone on the map; the mod gives it an agent
 
-    POST /api/incidents      a drone photographs what it can see; the shots go to n8n, and
-                             what comes back is written up with a map of the affected area
+    POST /api/incidents      a drone photographs what it can see; the shots are read here and
+                             written up with a map of the affected area
     GET  /api/incidents      those reports, newest first
     GET  /api/incidents/<id> one report in full
     GET  /incidents/<id>/<f> its photographs, its generated view and its map
@@ -723,8 +723,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
 
         # A drone is asked to photograph what it can see, and the pictures become a report:
-        # n8n captions them, the live feed says what is burning around it, and the two are
-        # written up together. Long enough to matter, so this only starts it.
+        # incidents.py captions them off the live feed, which also says what is burning around
+        # the drone, and the two are written up together. Long enough to matter, so this only
+        # starts it.
         if url.path == "/api/incidents":
             length = int(self.headers.get("Content-Length") or 0)
             if length > MAX_BODY:
@@ -1211,8 +1212,8 @@ def main():
     JOBS.mkdir(parents=True, exist_ok=True)
     load_jobs()
 
-    # Reports are written on their own thread: one waits minutes on n8n, and an operator
-    # asking for a second must not queue behind it or behind a world capture.
+    # Reports are written on their own thread: one takes a while, and an operator asking for a
+    # second must not queue behind it or behind a world capture.
     incidents.DRY_RUN = DRY_RUN
     incidents.load()
     incidents.start()
@@ -1257,7 +1258,7 @@ def main():
         print(f"  credits {marble.credits(key):.0f}")
     print(f"  POST    http://{args.host}:{args.port}/capture  (raw PNG body)")
     narrator = incidents.status()["analyst"]
-    print(f"  reports POST /api/incidents  ->  n8n captions the photo, "
+    print(f"  reports POST /api/incidents  ->  the photo is captioned here, "
           f"{narrator['model'] if narrator['available'] else 'nobody'} writes it up")
     print(f"  renders {RENDERS}  (newest also at {LATEST})")
     if httpd.save is None:

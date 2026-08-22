@@ -1,15 +1,15 @@
 /**
  * Incident reports, as the Python server serves them.
  *
- * A report is one drone's photographs of something, the picture n8n generated from them, a map
- * of the ground they cover, and the write-up over the top. Mirrors the record incidents.py
+ * A report is one drone's photographs of something, the generated view of the scene, a map of
+ * the ground they cover, and the write-up over the top. Mirrors the record incidents.py
  * writes to out/incidents/<id>/incident.json - the shape is theirs, not ours.
  */
 
 const BASE = "/backend";
 
 /**
- * generating is n8n's part, writing is the analyst's, and then the report stands.
+ * generating is the picture's part, writing is the analyst's, and then the report stands.
  *
  * There is no state for taking the photographs: they are already in hand by the time the
  * server answers, which is the point - the picture is the part somebody is waiting for.
@@ -102,15 +102,15 @@ export interface Incident {
   radius: number;
   shots: number;
   photos: string[];
-  /** the image n8n generated from the photograph, once it has */
+  /** the generated view of the scene, once it has been rendered */
   generated: string | null;
   generated_prompt: string | null;
   caption: string | null;
   world_url: string | null;
   generation_error: string | null;
   /**
-   * True while n8n is still generating its view. A report is finished and readable long before
-   * this goes false - the caption arrives in seconds, the picture in minutes.
+   * True while the generated view is still rendering. A report is finished and readable long
+   * before this goes false - the caption is immediate, the picture is not.
    */
   generating: boolean;
   progress: number | null;
@@ -146,8 +146,8 @@ export async function getIncidents(signal?: AbortSignal) {
 /**
  * Asks a drone to photograph what it can see and write it up.
  *
- * Resolves as soon as the photographs are taken - a second or two - and long before n8n and
- * the analyst have finished with them, which is why the record comes back mid-flight.
+ * Resolves as soon as the photographs are taken - a second or two - and long before the view
+ * and the analyst have finished with them, which is why the record comes back mid-flight.
  */
 export async function openIncident(request: {
   droneId: string;

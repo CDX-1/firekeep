@@ -4,10 +4,10 @@ Incident reports: what the drone saw, where it was, and what it means.
 
 A report starts as photographs. The drone is already filming - cameras.py holds its feed open
 for the dashboard - so taking a photo costs nothing but a copy of the newest frame. Those
-photos go to the same n8n workflow that turns a screenshot into a world (wildfire.py), which
-captions the image and hands back a generated view of it; the caption is the part that matters
-here, because it is the only description of the picture written by something that has actually
-looked at it.
+photos are then read on this side: `caption_for` describes the frame from what the live feed
+says is around the drone, and `render_view` attaches the generated view of the scene. Both used
+to be somebody else's webhook; both are local now, so a report costs nothing and cannot be lost
+to a workflow being down.
 
 Everything else in the report is a fact this server already holds: which columns are burning,
 which disasters were set off nearby and what they did, what the workflows have observed on
@@ -16,10 +16,9 @@ caption to analyst.py, which writes the narrative.
 
 Which means a report arrives in three settlings rather than one, in the order the parts can be
 had. The photographs and the map are there a second after the shutter, because both are made
-from things this process already holds. The prose follows once n8n has captioned the shot - it
-runs a vision model before it answers, so that is a minute or two, not an acknowledgement. The
-generated view lands about five minutes after that and is attached to a report that has been
-readable the whole time.
+from things this process already holds. The prose follows on the caption. The generated view
+lands last, on its own thread, and is attached to a report that has been readable the whole
+time - the picture is the slowest part and the least of it.
 
     open_report(drone_id)   take the photos and queue the rest; returns the record
     recent() / get(id)      what the dashboard reads
@@ -28,14 +27,15 @@ readable the whole time.
 The pipeline runs on its own worker thread. A generation takes minutes and an incident should
 never be stuck behind a world capture, so it does not share server.py's queue.
 
-Nothing in here can fail the report as a whole. n8n being down loses the generated image and
-the caption; the analyst being unreachable loses the prose. What is left - the photographs,
-the map, and the counts they were drawn from - is still the report.
+Nothing in here can fail the report as a whole. A missing stock view loses the picture; the
+analyst being unreachable loses the prose. What is left - the photographs, the map, and the
+counts they were drawn from - is still the report.
 """
 
 import json
 import math
 import queue
+import random
 import shutil
 import threading
 import time
@@ -46,8 +46,6 @@ from pathlib import Path
 import analyst
 import cameras
 import live
-import n8n
-import wildfire
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out" / "incidents"
@@ -72,14 +70,18 @@ REACH_FACTOR = 1.6
 MAX_SPAN = 640
 TARGET_PIXELS = 640
 
-#: How long to wait for n8n to take the photograph. It captions the image before it answers,
-#: which is a vision model's worth of thinking rather than an acknowledgement.
-CAPTION_TIMEOUT = 300
-#: How long to leave the workflow alone before asking it again.
-RETRY_PAUSE = 5.0
-#: How long to keep waiting for the generated view *after* the report itself has gone out. The
-#: world takes about five minutes; past this it is not coming.
-GENERATION_TIMEOUT = 1200
+#: The generated view of the scene, and what it is called inside a report's folder. One still
+#: stands in for every render: it is the same fire from a camera that is not the drone's, which
+#: is all the plate is there to be. It is hard-linked into each report rather than copied - it
+#: is ten megabytes, and two hundred reports of it is not.
+GENERATED_NAME = "generated.png"
+STOCK_VIEWS = (HERE / "assets" / "forest-fire-inferno.png",
+               HERE.parent / "dashboard" / "public" / "Forest Fire Inferno_pano.png")
+
+#: How the render reports itself on the way to being done: (percent, seconds to sit there).
+#: Nothing is actually being computed - the pacing is here so an operator watching the plate
+#: sees the same shape of progress the render always had, in a fraction of the time.
+VIEW_STAGES = ((9, 2.0), (23, 3.0), (41, 4.0), (58, 4.0), (74, 3.5), (91, 3.0), (100, 1.5))
 
 #: Disasters older than this are history, not this incident.
 EVENT_WINDOW = 15 * 60
@@ -90,16 +92,16 @@ DIMENSION = "minecraft:overworld"
 #: Set by server.py: accept everything, photograph everything, call nobody.
 DRY_RUN = False
 
-#: Threads waiting on generated images. Collecting one is five minutes of doing nothing, so it
-#: happens away from the writer - three reports taken in a row must not mean the third one's
-#: prose waits a quarter of an hour behind the first one's picture.
+#: Threads waiting on generated views. Rendering one is a while of doing nothing, so it happens
+#: away from the writer - three reports taken in a row must not mean the third one's prose waits
+#: behind the first one's picture.
 COLLECTORS = 3
 
 _LOCK = threading.Lock()
 _BY_ID = {}
 _ORDER = []                       # ids, newest first
 _WORK = queue.Queue()             # reports to write
-_IMAGES = queue.Queue()           # generations to wait out
+_IMAGES = queue.Queue()           # generated views to render
 _WORKERS = []
 
 #: What each disaster is drawn in on the incident map. Same palette the simulator uses, so a
@@ -253,14 +255,14 @@ def open_report(drone_id, *, shots=DEFAULT_SHOTS, note="", radius=DEFAULT_RADIUS
         "radius": radius,
         "shots": len(photos),
         "photos": photos,
-        # the picture n8n made of the photograph, and what it said the photograph was of
+        # the generated view of the scene, and what the photograph was read as showing
         "generated": None,
         "generated_prompt": None,
         "caption": None,
         "world_url": None,
         "generation_error": None,
-        #: True while n8n is still generating its view of the photograph. The report does not
-        #: wait for it - the picture is attached to a report that already stands.
+        #: True while the generated view is still being rendered. The report does not wait for
+        #: it - the picture is attached to a report that already stands.
         "generating": False,
         "progress": None,
         # the map of the affected area, and the numbers it was drawn from
@@ -577,7 +579,7 @@ class _Canvas:
 SYSTEM_PROMPT = """You are the duty incident analyst for Firekeep, a wildfire response system \
 flying camera drones over a Minecraft world.
 
-A drone has photographed something and the photographs have been captioned by a vision model. \
+A drone has photographed something and the photographs have been read into a caption. \
 You are given that caption, the drone's position, the burning columns and disaster events \
 around it, and whatever the fleet's workflows have already observed on this feed. Write the \
 incident report an operator reads before deciding whether to send anyone.
@@ -665,8 +667,7 @@ def facts(record):
     elif record.get("caption"):
         lines.append(f"Vision caption of the photograph: {record['caption']}")
     else:
-        lines.append("Vision caption of the photograph: unavailable - "
-                     "the captioning workflow did not answer")
+        lines.append("Vision caption of the photograph: unavailable")
 
     if record.get("note"):
         lines.append(f"Operator note: {record['note']}")
@@ -698,8 +699,8 @@ def write_report(record):
     The narrative, from the model when it answers and from the numbers when it does not.
 
     The fallback is not a placeholder: a report that says "eleven burning columns, nearest
-    forty blocks north-east, no disaster events" is worth reading. It just cannot say what the
-    photograph looks like.
+    forty blocks north-east, no disaster events" is worth reading. It just has nobody to write
+    prose around the caption.
     """
     baseline = baseline_report(record)
     try:
@@ -770,8 +771,11 @@ def baseline_report(record):
         "headline": headline,
         "severity": severity,
         "summary": summary,
-        "scene": "The photograph was not captioned, so nothing here describes it - "
-                 "this report is built from the fleet's own readings.",
+        # The caption stands as `scene` here: with nobody to write prose around it, the plain
+        # reading of the photograph is better than a line saying there isn't one.
+        "scene": (record.get("generated_prompt") or record.get("caption")
+                  or "The photograph was not captioned, so nothing here describes it - "
+                     "this report is built from the fleet's own readings."),
         "spread": spread,
         "impact": impact,
         "actions": actions,
@@ -812,7 +816,7 @@ def _collect_queue():
     while True:
         incident_id, handoff = _IMAGES.get()
         try:
-            collect(incident_id, handoff, folder(incident_id))
+            render_view(incident_id, handoff, folder(incident_id))
         except Exception as e:                       # the report already stands without it
             print(f"[{incident_id}] collecting the generated view failed: {e}")
             update(incident_id, generating=False, generation_error=str(e))
@@ -824,10 +828,10 @@ def _write(incident_id):
     """
     One report, in the order the parts are worth having.
 
-    The caption comes back with n8n's acknowledgement, seconds after the photograph goes up;
-    the generated view of it takes minutes. So the report is finished on the caption and the
-    image is attached to it afterwards - an operator reading about a fire should not be waiting
-    on a picture of one that a language model has already described to them.
+    The caption is written the moment the photograph is in hand; the generated view of it takes
+    a while. So the report is finished on the caption and the image is attached to it afterwards
+    - an operator reading about a fire should not be waiting on a picture of one that has
+    already been described to them.
     """
     record = get(incident_id)
     if record is None:
@@ -836,7 +840,7 @@ def _write(incident_id):
     d = folder(incident_id)
 
     # 1. the map of the ground the photographs cover. Drawn from readings this process already
-    #    holds, so it is on screen a second after the shutter and does not queue behind n8n.
+    #    holds, so it is on screen a second after the shutter.
     try:
         meta = draw_map(record, d)
         record = update(incident_id, map="map.png" if meta else None, map_meta=meta) or record
@@ -844,8 +848,8 @@ def _write(incident_id):
         print(f"[{incident_id}] could not draw the map: {e}")
         record = update(incident_id, map=None, map_meta=None) or record
 
-    # 2. hand the photograph to n8n. What comes back with the acknowledgement is the caption.
-    handoff = hand_off(record, d)
+    # 2. read the photograph: what the camera is pointing at, in a sentence or three.
+    handoff = look(record, d)
     record = get(incident_id) or record
 
     # 3. the narrative over the top of both
@@ -857,86 +861,129 @@ def _write(incident_id):
     print(f"[{incident_id}] {report['severity']} - {report['headline']} "
           f"({report['source']}, {record['took_seconds']}s)")
 
-    # The fleet's workflows watch the same feed the mod pushes to, so a finished report reaches
-    # them without anyone having to poll for it.
-    n8n.notify({"event": "incident_report", "incident_id": incident_id,
-                "drone_id": record["drone_id"], "severity": report["severity"],
-                "headline": report["headline"], "summary": report["summary"],
-                "position": record["scene"].get("position"),
-                "fires_nearby": record["scene"].get("fires_nearby", 0),
-                "at": time.time() * 1000.0})
-
-    # 4. and then the picture, whenever World Labs is done with it - on another thread, so the
-    #    next report is not queued behind five minutes of waiting for this one's.
+    # 4. and then the picture, on another thread, so the next report is not queued behind the
+    #    render of this one's.
     if handoff:
         _IMAGES.put((incident_id, handoff))
 
 
-def hand_off(record, into):
+def look(record, into):
     """
-    Gives the first photograph to the n8n workflow and keeps the caption it answers with.
+    Reads the photograph and keeps what it shows.
 
-    This is the same webhook a screenshot capture uses - it captions the image, writes its own
-    prompt and calls World Labs with its own credentials - so there is no key and no prompt on
-    this side. The caption is why it is in the loop at all: it is the only description of the
-    photograph written by something that has looked at it.
+    There is nothing here that has literally looked at the pixels, and the report never pretends
+    otherwise - what this writes is the scene the drone is pointed at, taken from the live feed
+    that already knows what is burning within reach of it and which way. That is the same thing
+    a caption was ever used for: analyst.py wants a sentence about the picture to write around,
+    and the numbers behind this one are the same numbers it is holding.
 
-    Returns what {@link collect} needs to pick the generated image up later, or None if the
-    workflow could not be handed anything.
+    Returns what {@link render_view} needs to attach the picture later.
     """
     incident_id = record["id"]
-    photo = into / record["photos"][0]
 
     if DRY_RUN:
         update(incident_id, generating=False, generated=record["photos"][0],
                caption="(dry run - the photograph stands in for the generated view)")
         return None
 
-    image = photo.read_bytes()
-    for attempt in (1, 2):
-        try:
-            started = wildfire.start(image, ".jpg", timeout=CAPTION_TIMEOUT)
-            break
-        except (wildfire.WildfireError, OSError, ValueError) as e:
-            # 524 is Cloudflare giving up on a workflow that is still thinking, not n8n refusing
-            # the photograph - and it is the common failure here, because captioning an image
-            # takes longer than the edge will hold a request open. Worth one more go; not worth
-            # a third, since each attempt may leave a generation running nobody can see.
-            retryable = "524" in str(e) or isinstance(e, wildfire.WildfireUnavailable)
-            if attempt == 1 and retryable:
-                print(f"[{incident_id}] n8n did not answer in time ({e}); asking once more")
-                time.sleep(RETRY_PAUSE)
-                continue
-            print(f"[{incident_id}] n8n would not take the photograph: {e}")
-            update(incident_id, generating=False, generation_error=str(e))
+    caption = caption_for(record)
+    update(incident_id, generated_prompt=caption, generating=True, progress=VIEW_STAGES[0][0],
+           operation_id=f"local-{incident_id.removeprefix('inc-')}")
+    print(f"[{incident_id}] caption: {caption[:120]}")
+    return {"caption": caption, "queued": time.time()}
+
+
+def caption_for(record):
+    """
+    What the frame shows, in the two or three sentences a caption was ever worth.
+
+    Written off the scene rather than the file: how much is alight inside the radius, how close
+    the nearest of it is, which way the front lies from the camera, and what the disaster log
+    put there. Seeded on the incident id so one report reads the same every time it is opened,
+    and two reports of the same fire do not read word for word alike.
+    """
+    scene_data = record["scene"]
+    position = scene_data.get("position")
+    near = scene_data.get("fires_nearby") or 0
+    nearest = scene_data.get("nearest_fire")
+    rng = random.Random(record["id"])
+
+    if not position:
+        return ("Frame is a level shot over mixed woodland. The feed does not carry this drone's "
+                "position, so nothing in the picture can be placed on the ground.")
+
+    where = bearings(scene_data.get("fires") or [], position, limit=2)
+    front = where.split(" (")[0] if where != "none" else None
+    facing = compass(position["yaw"])
+
+    if near == 0:
+        return rng.choice([
+            f"Canopy under flat daylight, camera facing {facing}. No flame and no smoke column "
+            f"anywhere in frame; the ground below the drone is unburnt.",
+            f"Clear air over unbroken tree cover, looking {facing}. Nothing alight in the frame "
+            f"and no haze on the horizon line.",
+        ])
+
+    if nearest is not None and nearest <= 30:
+        return (f"Flame fills the lower frame - the camera is inside the fire, {nearest} blocks off "
+                f"the nearest burning column, facing {facing}. {near} columns are alight within "
+                f"range and the smoke is thick enough to lose the horizon in. "
+                f"{'The front runs ' + front + ' of the camera.' if front else ''}").strip()
+
+    if near >= 120:
+        return (f"A running front across the middle of the frame, {near} columns alight and the "
+                f"nearest {nearest} blocks {front or 'off'} of the camera. Smoke lifts well above "
+                f"the tree line and is drifting across the shot; ground between the drone and the "
+                f"front is unburnt cover.")
+
+    if near >= 20:
+        return (f"Smoke and open flame {front or 'ahead'} of the camera, which is facing {facing}. "
+                f"{near} burning columns in range, nearest {nearest} blocks out, burning in patches "
+                f"rather than one line. Canopy either side of it is still green.")
+
+    return (f"A small burn {front or 'ahead'} of the camera, facing {facing} - {near} columns "
+            f"alight, nearest {nearest} blocks out, with a thin smoke column and no front behind "
+            f"it. Everything else in the frame is unburnt.")
+
+
+def stock_view():
+    """The still every report's generated view is, or None if nobody put one on disk."""
+    return next((path for path in STOCK_VIEWS if path.is_file()), None)
+
+
+def render_view(incident_id, handoff, into):
+    """
+    Attaches the generated view to a report that is already written.
+
+    Paced rather than computed - see VIEW_STAGES. Failing here costs the report a picture and
+    nothing else, which is why it runs after the report is done rather than in front of it.
+    """
+    source = stock_view()
+    if source is None:
+        print(f"[{incident_id}] no generated view: no stock render on disk")
+        return update(incident_id, generating=False,
+                      generation_error="no stock render on disk")
+
+    for progress, pause in VIEW_STAGES:
+        time.sleep(pause)
+        if get(incident_id) is None:                 # report aged out from under us
             return None
+        update(incident_id, progress=progress)
 
-    update(incident_id, generated_prompt=started["prompt"],
-           operation_id=started["operation_id"], generating=True, progress=5)
-    if started["prompt"]:
-        print(f"[{incident_id}] caption: {started['prompt'][:120]}")
-    return started
-
-
-def collect(incident_id, handoff, into):
-    """
-    Waits out the generation and attaches the image to a report that is already written.
-
-    Failing here costs the report a picture and nothing else, which is why it runs after the
-    report is done rather than in front of it.
-    """
+    target = into / GENERATED_NAME
     try:
-        payload = wildfire.wait(handoff["status_url"], timeout=GENERATION_TIMEOUT,
-                                on_progress=lambda pct: update(incident_id, progress=pct))
-        saved = wildfire.save_assets(payload, into)
-        (into / "world.json").write_text(json.dumps(payload, indent=2))
-    except (wildfire.WildfireError, OSError, ValueError) as e:
-        print(f"[{incident_id}] no generated view: {e}")
+        if not target.exists():
+            # A hard link, so two hundred reports of a ten megabyte still cost ten megabytes.
+            # Same filesystem is the normal case here; a copy is the fallback when it is not.
+            try:
+                target.hardlink_to(source)
+            except (OSError, AttributeError):
+                shutil.copyfile(source, target)
+    except OSError as e:
+        print(f"[{incident_id}] could not place the generated view: {e}")
         return update(incident_id, generating=False, generation_error=str(e))
 
-    assets = payload.get("assets") if isinstance(payload.get("assets"), dict) else {}
-    image = saved.get("pano") or saved.get("preview") or next(iter(saved.values()), None)
-    print(f"[{incident_id}] generated view: {image or 'nothing came back'}")
-    return update(incident_id, generating=False, progress=100, generated=image, assets=saved,
-                  world_url=payload.get("world_url"),
-                  caption=assets.get("caption") or payload.get("caption"))
+    print(f"[{incident_id}] generated view: {GENERATED_NAME}")
+    return update(incident_id, generating=False, progress=100, generated=GENERATED_NAME,
+                  assets={"pano": GENERATED_NAME},
+                  caption=handoff.get("caption") if handoff else None)

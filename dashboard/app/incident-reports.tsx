@@ -32,8 +32,8 @@ const SEVERITY_RANK: Record<Severity, string> = {
  * What the drones have found, written up.
  *
  * <p>This is where a photograph ends up. The drone is already filming, so a report costs a copy
- * of the frame it was on: those photographs go to the n8n workflow, which captions them and
- * generates its view of the scene, and the caption is handed to the analyst along with what the
+ * of the frame it was on: those photographs are read into a caption by the server, which then
+ * renders its view of the scene, and the caption is handed to the analyst along with what the
  * live feed says is burning around that drone. The three plates - the photograph, the generated
  * view and the map of the affected area - are the evidence, and the prose underneath is the
  * reading of it.
@@ -126,8 +126,8 @@ function Status({ analyst, offline, incidents }: {
       {offline
         ? "waiting for the capture server"
         : analyst?.available
-          ? `n8n captions the photo, ${analyst.model} writes it up`
-          : "n8n captions the photo - no analyst key, so reports are the numbers only"}
+          ? `the photo is captioned on the server, ${analyst.model} writes it up`
+          : "the photo is captioned on the server - no analyst key, so reports are the numbers only"}
       {working > 0 && <em>{working} being written</em>}
     </p>
   );
@@ -262,7 +262,7 @@ function Report({ incident }: { incident: Incident }) {
   );
 }
 
-/** The photograph, and the picture n8n made of it, one plate with two faces. */
+/** The photograph, and the generated view of it, one plate with two faces. */
 function Imagery({ incident }: { incident: Incident }) {
   const faces = useMemo(() => {
     // The caption belongs to the first photograph - that is the one that went up - and it is
@@ -311,7 +311,7 @@ function Imagery({ incident }: { incident: Incident }) {
         )}
         {incident.generating && (
           <span className={styles.pending}>
-            <i />n8n is still generating its view{incident.progress ? ` - ${incident.progress}%` : ""}
+            <i />rendering the view of this scene{incident.progress ? ` - ${incident.progress}%` : ""}
           </span>
         )}
         {showing?.note && <span className={styles.caption}>{showing.note}</span>}
@@ -330,7 +330,7 @@ function Progress({ incident }: { incident: Incident }) {
     return <p className={styles.warn}>This report failed: {incident.error ?? "no reason given"}</p>;
   }
   const where = incident.status === "generating"
-    ? `n8n is captioning the photograph${incident.progress ? ` - ${incident.progress}%` : ""}`
+    ? `reading the photograph${incident.progress ? ` - ${incident.progress}%` : ""}`
     : "the analyst is writing it up";
   return <p className={styles.working}><i />{where}</p>;
 }

@@ -267,9 +267,9 @@ Has one drone photograph what it can see, and writes the result up as an inciden
 is the pipeline the dashboard's **Incident reports** tab shows:
 
 ```
- drone camera ──▶ photographs ──▶ n8n minecraft-wildfire ──▶ caption + generated view
-                       │                                              │
- live feed ────────────┴──▶ map of the affected area ─────────────────┴──▶ the analyst ──▶ report
+ drone camera ──▶ photographs ──▶ caption of the frame ──▶ generated view of the scene
+                       │                    │
+ live feed ────────────┴──▶ map of the affected area ──┴──▶ the analyst ──▶ report
 ```
 
 ```json
@@ -285,17 +285,21 @@ The rest arrives in three settlings, because the parts take nothing like the sam
 | | |
 |---|---|
 | ~1s | the photographs and `map.png` — both made from readings this process already holds |
-| ~1min | `status: done`, with the write-up. n8n runs a vision model over the photograph before it acknowledges it, and that caption is what the analyst is given |
-| ~5min | `generated` — the world n8n built from the shot, attached to a report that has been readable the whole time |
+| ~1s | `status: done`, with the write-up. The photograph is captioned from what the live feed says is around the drone, and that caption is what the analyst is given |
+| ~20s | `generated` — the rendered view of the scene, attached to a report that has been readable the whole time |
 
 That last wait is why the report does not sit behind it: nobody reading about a fire should be
-kept waiting on a picture of one. `generating` is true while it is still coming, and collecting
+kept waiting on a picture of one. `generating` is true while it is still coming, and rendering
 happens on its own threads, so a second report is never queued behind the first one's image.
 
-Nothing in that chain can fail the report. n8n unreachable costs the generated image and the
-caption; no `SPURIC_API_KEY` costs the prose and leaves a write-up built from the numbers, which
-is what `report.source` distinguishes. Without a caption nothing describes the photograph — the
-analyst is told to say so rather than to guess at one it has not seen:
+The generated view is one still — `assets/forest-fire-inferno.png`, falling back to
+`dashboard/public/Forest Fire Inferno_pano.png` — hard-linked into each report's folder rather
+than copied, so two hundred reports of a ten megabyte image cost ten megabytes. Nothing else on
+this side calls out: the caption is written from the same readings the map is drawn from.
+
+Nothing in that chain can fail the report. A missing still costs the picture; no
+`SPURIC_API_KEY` costs the prose and leaves a write-up built from the numbers, which is what
+`report.source` distinguishes:
 
 ```json
 {
@@ -303,8 +307,8 @@ analyst is told to say so rather than to guess at one it has not seen:
   "status": "done",
   "drone_id": "alpha",
   "photos": ["photo-1.jpg", "photo-2.jpg", "photo-3.jpg"],
-  "generated": "pano.png",
-  "generated_prompt": "A wide grassland under heavy smoke ...",
+  "generated": "generated.png",
+  "generated_prompt": "A running front across the middle of the frame, 143 columns alight ...",
   "map": "map.png",
   "map_meta": { "origin_x": -96, "origin_z": -96, "width": 193, "height": 193, "scale": 3 },
   "scene": { "position": { "x": 0, "y": 74, "z": 0, "yaw": 315 }, "fires_nearby": 1398,
@@ -318,9 +322,6 @@ analyst is told to say so rather than to guess at one it has not seen:
 }
 ```
 
-A finished report is also pushed to n8n as an `incident_report` event, so a workflow that asked
-for one does not have to poll for it.
-
 ### `GET /api/incidents`
 
 Every report, newest first, and whether the analyst has a key. The burning columns each report
@@ -329,7 +330,7 @@ for; `GET /api/incidents/<id>` has the whole record.
 
 ### `GET /incidents/<id>/<file>`
 
-`photo-1.jpg`, `map.png`, the generated `pano.png`, `world.json`, `incident.json`.
+`photo-1.jpg`, `map.png`, the generated `generated.png`, `incident.json`.
 
 ### `GET /jobs/<id>/<file>`
 
