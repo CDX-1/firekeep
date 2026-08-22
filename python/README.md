@@ -32,6 +32,7 @@ Wiring up the mod? Run with `--dry-run` and hammer it as hard as you like.
 | `--workers 1` | concurrent generations |
 | `--dry-run` | no API calls, no credits |
 | `--prompt "..."` | style guidance |
+| `--save DIR` | Minecraft save to map (default: newest under `fabric/run/saves`) |
 
 ## From inside Minecraft
 
@@ -116,6 +117,94 @@ One job, plus the full Marble `world` payload (mesh, splat and pano URLs).
 ### `GET /latest.png`
 
 The most recent finished render, straight as an image.
+
+### `GET /api/world`
+
+Metadata for a top-down map of the live save, read straight off the region
+files - no mod and no running game needed.
+
+```json
+{ "name": "New World", "dimension": "overworld",
+  "origin_x": -288, "origin_z": -240, "width": 480, "height": 432,
+  "blocks_per_pixel": 1, "chunks": 788, "spawn": { "x": 0, "y": 77, "z": 0 } }
+```
+
+`origin_x`/`origin_z` are the block coordinates of the map's top-left pixel,
+which is what turns a pixel back into a position in the world.
+
+Add `?dimension=the_nether` or `the_end` for the other two, and `?refresh=1` to
+re-render before Minecraft has written the region files again.
+
+### `POST /api/live`
+
+The mod's live world feed. It pushes every surface column that changed, a few times a
+second, so the map can show a fire spreading instead of whatever the last autosave caught.
+
+```json
+{ "session": "3f9c1a04", "dimension": "minecraft:overworld", "tick": 84213,
+  "columns": [12, -7, 16733726, 13, -7, 4276545],
+  "drones": [{ "id": "drone-1", "x": 12.5, "y": 91.0, "z": -7.25, "yaw": 132.0,
+               "target": [40, 91, 12] }] }
+```
+
+`columns` is flat - x, z, packed - where packed carries flags in its top byte (bit 0 means
+the column is on fire or under lava) and the map colour in the low three. A new `session`
+means the world restarted and anything held from before is about somewhere else.
+
+The reply carries any drone orders the dashboard has queued, so an order costs no extra
+round trip:
+
+```json
+{ "ok": true, "columns": 2, "hot": 41, "watchers": 1,
+  "commands": [{ "id": "drone-1", "x": 40.0, "y": 91.0, "z": 12.0 }] }
+```
+
+### `POST /api/drones/goto`
+
+`{ "id": "drone-1", "x": 40, "y": 91, "z": 12 }` - queues a flight for the mod to collect.
+
+### `GET /api/live`
+
+What the feed knows right now: bounds, chunk count, which columns are burning, where the
+drones are, and `live` - false once the mod has been quiet for six seconds.
+
+### `GET /api/world/stream`
+
+Server-sent events. One `hello` with the above, a `delta` for every batch the mod pushes,
+and a `status` heartbeat every 15s.
+
+```sh
+curl -N localhost:8000/api/world/stream
+```
+
+The stream sets `Cache-Control: no-transform`, without which the dashboard's dev proxy
+gzips it - and a buffered event stream never reaches the browser.
+
+### `GET /api/world/live.png`
+
+Everything the feed has seen, as one RGBA image, transparent where nothing is known. The
+dashboard loads this once on connect and patches it from the stream after that.
+
+### `GET /api/world/map.png`
+
+That map: one pixel per block, painted with vanilla's own map palette and
+north-facing relief shading. Ungenerated chunks are transparent. A few hundred
+chunks take a couple of seconds the first time, then it is cached until the save
+changes on disk.
+
+## Two maps, one picture
+
+The map is drawn from two sources and needs both:
+
+| | knows | freshness |
+|---|---|---|
+| `worldmap.py`, off disk | the whole explored world | last autosave, so up to ~5 min stale |
+| `live.py`, from the mod | only chunks that are loaded | as it happens |
+
+Region files are the only place the *whole* world exists, but Minecraft writes them on
+autosave, so nothing read from disk can ever be live. The mod sees every block change the
+instant it happens, but only for chunks near a player. The dashboard draws the feed over
+the baseline, so you get a complete map that is live where anything is actually happening.
 
 ## What you get back
 
@@ -203,10 +292,15 @@ Writes into the same `out/jobs/<id>/` layout.
 | `marble.py` | World Labs API client |
 | `server.py` | capture server: queue, workers, JSON API, folder watcher |
 | `main.py` | one-shot CLI |
+| `worldmap.py` | renders a save's region files into a top-down PNG (also a CLI) |
+| `live.py` | the live world layer: the mod's feed, and the stream out to dashboards |
+| `mapcolors.py` | block id -> vanilla map colour |
+| `nbt.py` | minimal NBT reader, decode only |
 | `viewer.html` | rough built-in viewer, served at `/` |
 | `out/jobs/` | one folder per capture |
 | `out/renders/` | every finished render as a plain PNG |
 | `out/latest.png` | the newest one |
+| `out/world/` | cached world maps, one PNG per dimension |
 
 `.env` and `out/` are gitignored, and the server never serves anything outside
 `out/jobs/`.
