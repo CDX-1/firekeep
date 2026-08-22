@@ -33,6 +33,31 @@ Wiring up the mod? Run with `--dry-run` and hammer it as hard as you like.
 | `--dry-run` | no API calls, no credits |
 | `--prompt "..."` | style guidance |
 
+## From inside Minecraft
+
+The Fabric mod adds a client-side command. Point it at a running server and it
+grabs the frame, uploads it, and follows the job in chat until the PNG lands.
+
+```
+/screenshot                            capture with the server's default model and prompt
+/screenshot <prompt...>                capture with your own style guidance
+/screenshot model <model> [<prompt>]   capture on a specific Marble model
+/screenshot status                     server health, credits, queue depth
+/screenshot server [<url>]             show or change where captures are sent
+```
+
+The capture waits for the chat screen to close and hides the HUD first, so no
+hotbar or chat text ends up reconstructed as floating 3D geometry. Frames are
+downscaled to 1920px on the long edge before upload.
+
+By default it talks to `http://127.0.0.1:8000`. Override it without recompiling
+with the `FIREKEEP_SERVER` environment variable or the `firekeep.server` system
+property, or at runtime with `/screenshot server <url>`.
+
+Wiring the mod up for the first time? Run the server with `--dry-run`: captures
+are accepted, the screenshot is echoed straight back out to `out/renders/`, and
+nothing is generated or charged.
+
 ## API
 
 ### `POST /capture`
@@ -88,6 +113,10 @@ One job, plus the full Marble `world` payload (mesh, splat and pano URLs).
 
 `pano.png`, `preview.jpg`, `source.png`, `world.json`.
 
+### `GET /latest.png`
+
+The most recent finished render, straight as an image.
+
 ## What you get back
 
 Per finished job, on disk in `out/jobs/<id>/`:
@@ -102,6 +131,11 @@ Per finished job, on disk in `out/jobs/<id>/`:
 
 The pano is noticeably sharper than the splats, because the splat world is a
 reconstruction *of* the pano. If you only want images, the pano is the one.
+
+The job folder is the archive. For actually looking at results, every finished
+job also drops its pano into `out/renders/<timestamp>-<id>.png` and copies it to
+`out/latest.png`, so there is always one obvious file to open. That path comes
+back on the job as `result_png`, which is what the mod prints in chat.
 
 ## Cost
 
@@ -122,11 +156,34 @@ takes real 360 panoramas with `Ctrl+F2` (six cubemap faces). Stitch those to
 equirect, POST with `?pano=1`, and you get better geometry for less — the back
 half of the scene is real instead of invented.
 
+## Getting realism out of it
+
+Marble's default instinct is to stay faithful to the input, which on a Minecraft
+frame means smoother, better-lit Minecraft. Two things push it off that:
+
+**The prompt.** `marble.DEFAULT_PROMPT` explicitly asks it to keep the layout but
+throw the art style away - no blocks, no voxels, no pixelated textures, real bark
+and leaves and rock at human proportions. Asking it to "keep the composition"
+without that second half is what gets you Minecraft back. Override per capture
+with `--prompt`, `?prompt=`, or `/screenshot <prompt...>` in game.
+
+**The model.** `marble-1.0-draft` is the server default because captures can fire
+automatically and 1,580 credits a shot adds up - but draft is also the one that
+clings hardest to the input. If a scene comes back too blocky, re-run it on
+`marble-1.1`, which has far more room to reinterpret geometry:
+
+```sh
+./server.py --model marble-1.1
+```
+
+or per capture, without restarting anything: `/screenshot model marble-1.1`.
+
 ## Taking a good screenshot
 
 Marble reconstructs whatever it sees, so a debug overlay becomes floating 3D text.
 
-- `F1` hides the HUD, `F3` toggles the debug overlay off, `F2` captures
+- `/screenshot` hides the HUD for you; `F3` still has to be off
+- Taking one by hand: `F1` hides the HUD, `F2` captures
 - Wide scenes with real depth work best
 
 ## One-shot, without the server
@@ -148,6 +205,8 @@ Writes into the same `out/jobs/<id>/` layout.
 | `main.py` | one-shot CLI |
 | `viewer.html` | rough built-in viewer, served at `/` |
 | `out/jobs/` | one folder per capture |
+| `out/renders/` | every finished render as a plain PNG |
+| `out/latest.png` | the newest one |
 
 `.env` and `out/` are gitignored, and the server never serves anything outside
 `out/jobs/`.

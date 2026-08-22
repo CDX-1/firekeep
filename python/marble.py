@@ -34,10 +34,20 @@ MODELS = {
 }
 PANO_STEP = 80
 
+# The layout has to survive; the art style must not. Saying "keep the
+# composition" without saying "drop the voxels" gets you smoother Minecraft.
 DEFAULT_PROMPT = (
-    "A photorealistic real-world landscape photograph of this scene. "
-    "Natural materials, real geology and foliage, soft realistic lighting, "
-    "atmospheric depth. Keep the original layout, terrain shape and composition."
+    "Transform this Minecraft scene into a photorealistic 3D environment. "
+    "Preserve the exact terrain layout and the relative positions of trees, roads, "
+    "structures, hills, water, fire and other major objects. "
+    "Replace Minecraft's block-based geometry, textures and proportions with "
+    "realistic natural-world geometry and materials: individual leaves and branches "
+    "instead of leaf cubes, real bark, rock, soil and stone instead of tiled block "
+    "faces, believable human-scale proportions instead of one-metre cubes. "
+    "Make the vegetation, terrain, structures, lighting, smoke and fire physically "
+    "realistic, with natural light falloff, soft shadows and atmospheric depth. "
+    "Do not preserve the Minecraft visual style - no visible blocks, voxels, "
+    "pixelated textures or hard cubic edges anywhere in the scene."
 )
 
 

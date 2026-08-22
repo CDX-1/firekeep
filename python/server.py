@@ -16,7 +16,11 @@ The mod POSTs raw PNG bytes:
     GET  /api/jobs/<id>      one job, including the full world payload
     GET  /api/health         {ok, credits, queued, busy}
     GET  /jobs/<id>/pano.png source.png, preview.jpg, job.json
+    GET  /latest.png         the most recent finished render
     GET  /                   the viewer
+
+Every finished job also drops a plain PNG in out/renders/, and copies it to
+out/latest.png, so there is always one obvious file to look at.
 """
 
 import argparse
@@ -38,6 +42,8 @@ import marble
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
 JOBS = OUT / "jobs"
+RENDERS = OUT / "renders"        # every finished render, flat and easy to open
+LATEST = OUT / "latest.png"      # ...and the newest one, always at the same path
 
 MAX_UPLOAD = 32 * 1024 * 1024          # 32 MB is far above any screenshot
 JOBS_LOCK = threading.Lock()
@@ -114,6 +120,7 @@ def submit(image_bytes, extension, *, model, prompt, is_pano, source):
         "world_id": None,
         "marble_url": None,
         "assets": {},
+        "result_png": None,
         "error": None,
     }
     with JOBS_LOCK:
@@ -122,6 +129,32 @@ def submit(image_bytes, extension, *, model, prompt, is_pano, source):
     WORK.put(job_id)
     print(f"[{job_id}] queued  <- {source} ({len(image_bytes)/1e6:.1f} MB, {model})")
     return job
+
+
+def publish_result(job, saved):
+    """Copy the finished render out to out/renders/ and out/latest.png.
+
+    The job folder is the archive; this is the one file you can just open. The
+    pano is the sharpest 2D output Marble produces, so prefer it and fall back
+    to the thumbnail. Returns the path, or None if the job produced no image.
+    """
+    d = job_dir(job["id"])
+    source = None
+    for key_name in ("pano", "preview"):
+        candidate = d / saved.get(key_name, "")
+        if saved.get(key_name) and candidate.is_file():
+            source = candidate
+            break
+    if source is None:
+        return None
+
+    RENDERS.mkdir(parents=True, exist_ok=True)
+    stamp = job["created"].replace("-", "").replace(":", "").replace("+0000", "")
+    dest = RENDERS / f"{stamp}-{job['id']}{source.suffix}"
+    shutil.copyfile(source, dest)
+    if source.suffix == ".png":
+        shutil.copyfile(source, LATEST)
+    return str(dest)
 
 
 def worker(key):
@@ -148,8 +181,13 @@ def run_job(job_id, key):
         for pct in (25, 60, 100):
             time.sleep(0.6)
             update(job_id, progress=pct)
+        # echo the screenshot straight back out so the mod round trip is still
+        # end-to-end testable without spending a credit
+        echoed = {"pano": job["source_file"]} if job["source_file"].endswith(".png") else {}
+        result = publish_result(job, echoed)
         update(job_id, status="done", world_id="dry-run", estimated_credits=0,
-               assets={}, took_seconds=1.8, caption="(dry run - nothing generated)")
+               assets={}, result_png=result, took_seconds=1.8,
+               caption="(dry run - the screenshot was echoed back, nothing was generated)")
         return
 
     print(f"[{job_id}] generating ({job['model']})")
@@ -165,11 +203,14 @@ def run_job(job_id, key):
     saved = marble.save_assets(world, d)
     (d / "world.json").write_text(json.dumps(world, indent=2))
 
+    result = publish_result(job, saved)
+
     update(job_id, status="done", progress=100, world_id=world.get("world_id"),
            marble_url=world.get("world_marble_url"), assets=saved,
+           result_png=result,
            caption=(world.get("assets") or {}).get("caption"),
            took_seconds=round(time.time() - t0, 1))
-    print(f"[{job_id}] done in {time.time()-t0:.0f}s -> {world.get('world_marble_url')}")
+    print(f"[{job_id}] done in {time.time()-t0:.0f}s -> {result or world.get('world_marble_url')}")
 
 
 # --------------------------------------------------------------------------
@@ -300,6 +341,11 @@ class Handler(BaseHTTPRequestHandler):
                 job["world"] = json.loads(wf.read_text())
             return self.send_json(job)
 
+        if path == "/latest.png":
+            if not LATEST.is_file():
+                return self.send_json({"error": "nothing rendered yet"}, HTTPStatus.NOT_FOUND)
+            return self.send_bytes(LATEST.read_bytes(), "image/png")
+
         if path in ("/", "/index.html"):
             viewer = HERE / "viewer.html"
             if not viewer.is_file():
@@ -366,6 +412,7 @@ def main():
         print(f"  model   {args.model} (~{marble.MODELS[args.model] + marble.PANO_STEP} credits/capture)")
         print(f"  credits {marble.credits(key):.0f}")
     print(f"  POST    http://{args.host}:{args.port}/capture  (raw PNG body)")
+    print(f"  renders {RENDERS}  (newest also at {LATEST})")
     if args.watch or args.watch_dir:
         for d in dirs:
             print(f"  watch   {d}")
