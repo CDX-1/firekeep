@@ -55,7 +55,12 @@ type Drag =
 /** What we are drawing under the drones: either the real save, or a stand-in. */
 type Backdrop = { meta: WorldMeta; image: CanvasImageSource; real: boolean };
 
-export default function WorldMap({ active }: { active: boolean }) {
+type WorldMapProps = {
+  active: boolean;
+  onOpenDroneFeed: (id: string) => void;
+};
+
+export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ x: 0, y: 0, scale: 1 });
@@ -349,6 +354,16 @@ export default function WorldMap({ active }: { active: boolean }) {
     zoomBy(Math.exp(-event.deltaY * 0.0015), event.clientX - box.left, event.clientY - box.top);
   };
 
+  /** Double-clicking a drone on the map hands you over to its feed, still on that drone. */
+  const onDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const id = pick(event.clientX - box.left, event.clientY - box.top);
+    if (!id) return;
+    event.preventDefault();
+    setSelected(id);
+    onOpenDroneFeed(id);
+  };
+
   useEffect(() => {
     if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -409,6 +424,7 @@ export default function WorldMap({ active }: { active: boolean }) {
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
           onPointerLeave={() => { cursorRef.current = null; hoverRef.current = null; setCursor(null); }}
+          onDoubleClick={onDoubleClick}
           onWheel={onWheel}
         />
 
@@ -562,6 +578,7 @@ function syncMarkers(markers: Marker[], live: LiveDrone[], dt: number) {
   markers.length = 0;
   markers.push(...next);
 }
+
 
 // --------------------------------------------------------------------------
 // rendering

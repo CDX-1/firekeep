@@ -31,7 +31,12 @@ type Drone = DroneCamera & { area: Area };
  */
 type FeedMode = "off" | "still" | "stream";
 
-export default function LiveMonitoring() {
+type LiveMonitoringProps = {
+  /** A drone the map has handed over, as a fresh object per request so repeats still land. */
+  request: { id: string } | null;
+};
+
+export default function LiveMonitoring({ request }: LiveMonitoringProps) {
   const [activeFilter, setActiveFilter] = useState<Filter>("All");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // Held by id, not by object: the roster is replaced on every poll, so anything remembered by
@@ -39,6 +44,7 @@ export default function LiveMonitoring() {
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [controllingId, setControllingId] = useState<string | null>(null);
+  const handledRequest = useRef<{ id: string } | null>(null);
 
   // Flying by hand needs a fresher position than a wall of thumbnails does.
   const { drones, offline } = useDroneRoster(controllingId ? ROSTER_CONTROL_INTERVAL_MS : ROSTER_INTERVAL_MS);
@@ -57,6 +63,18 @@ export default function LiveMonitoring() {
     setFocusedId(null);
     setSelectedId(null);
   };
+
+  // A handover is honoured once, and only once the roster actually carries that drone: a
+  // request can land a poll or two before the drone it names does.
+  useEffect(() => {
+    if (!request || request === handledRequest.current) return;
+    const drone = drones.find((item) => item.id === request.id);
+    if (!drone) return;
+    handledRequest.current = request;
+    setActiveFilter(drone.area);
+    setFocusedId(drone.id);
+    setSelectedId(null);
+  }, [drones, request]);
 
   const moveViewer = (offset: number) => {
     if (selectedIndex < 0) return;
