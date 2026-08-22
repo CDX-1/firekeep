@@ -82,6 +82,27 @@ export async function sendDroneFly(
   return res.json() as Promise<{ ok: boolean; queued: number }>;
 }
 
+/**
+ * Puts a new drone into the world at a point on the map.
+ *
+ * Nothing comes back but the queue depth: the mod builds the drone on its next feed pull, gives
+ * it a rendering agent and reports it in the feed after that, so the new drone arrives the same
+ * way every other change to the world does rather than being drawn optimistically here.
+ *
+ * `y` is left out on purpose - the map is top-down, and the mod knows where the ground is.
+ */
+export async function spawnDrone(x: number, z: number, dimension = DIMENSION) {
+  const res = await fetch(`${BASE}/api/drones/spawn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ x, z, dimension }),
+  });
+  if (!res.ok) {
+    throw new Error((await res.json().catch(() => ({}))).error ?? `spawn -> ${res.status}`);
+  }
+  return res.json() as Promise<{ ok: boolean; queued: number }>;
+}
+
 /** Brakes the drone and holds wherever it is. */
 export async function sendDroneHover(id: string) {
   const res = await fetch(`${BASE}/api/drones/hover`, {
@@ -90,5 +111,16 @@ export async function sendDroneHover(id: string) {
     body: JSON.stringify({ id }),
   });
   if (!res.ok) throw new Error(`hover -> ${res.status}`);
+  return res.json() as Promise<{ ok: boolean; queued: number }>;
+}
+
+/** Tilts the camera down in degrees without changing the drone's current movement. */
+export async function sendDroneLook(id: string, pitch: number) {
+  const res = await fetch(`${BASE}/api/drones/look`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, pitch }),
+  });
+  if (!res.ok) throw new Error(`look -> ${res.status}`);
   return res.json() as Promise<{ ok: boolean; queued: number }>;
 }

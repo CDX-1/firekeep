@@ -213,9 +213,23 @@ round trip:
 `{ "id": "drone-1", "forward": 1, "right": 0, "up": 0, "yaw": 0 }` - Minecraft-style stick
 in the camera frame. The drone keeps that velocity until a hover or goto. Zeros hover.
 
+### `POST /api/drones/look`
+
+`{ "id": "drone-1", "pitch": 25 }` - tilts the camera 25 degrees down without changing the
+drone's active flight. Pitch ranges from `0` (level) to `90` (straight down).
+
 ### `POST /api/drones/hover`
 
 `{ "id": "drone-1" }` - brakes and holds.
+
+### `POST /api/drones/spawn`
+
+`{ "x": 40, "z": 12 }` - puts a new drone into the world there, on the same queue as a flight
+order. `y` is optional and normally left out: the world map is top-down, so the mod drops the
+drone just above the ground rather than the dashboard guessing an altitude. `id` is optional too;
+without one the mod names it. The mod launches a rendering agent for the new drone as soon as it
+exists, so it turns up on the camera wall as well as the map - up to `maxAgents` in
+`fabric/run/config/firekeep-agents.json`.
 
 ### `GET /api/live`
 

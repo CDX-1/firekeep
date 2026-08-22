@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.awsaf.firekeep.Firekeep;
+import dev.awsaf.firekeep.agent.AgentSupervisor;
+import dev.awsaf.firekeep.drone.DroneManager;
 import dev.awsaf.firekeep.entity.DroneEntity;
 import dev.awsaf.firekeep.entity.FirekeepEntities;
 import dev.awsaf.firekeep.net.FirekeepServer;
@@ -16,6 +18,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 
 import java.io.IOException;
@@ -53,6 +56,8 @@ public final class WorldFeed {
     private static final int QUEUE_DEPTH = 4;
     /** How long to stop trying after a failed push. */
     private static final int RETRY_SECONDS = 10;
+    /** Blocks above the ground a map-placed drone starts at, so it never spawns inside terrain. */
+    private static final int SPAWN_CLEARANCE = 3;
 
     private static final Map<ServerLevel, LongOpenHashSet> DIRTY = new HashMap<>();
     private static final BlockingQueue<byte[]> OUTBOX = new ArrayBlockingQueue<>(QUEUE_DEPTH);
@@ -332,9 +337,10 @@ public final class WorldFeed {
      * lands within one flush. The work itself is handed to the server thread, since that is
      * the only place an entity or a block may be touched.
      *
-     * <p>Two kinds of thing come down this channel: flight orders for a drone, and the disaster
-     * events the simulator sets off. Orders written before events existed carry no type at all,
-     * so a missing one still means "fly there".
+     * <p>Three kinds of thing come down this channel: flight orders for a drone, the disaster
+     * events the simulator sets off, and a request to put a new drone into the world. Orders
+     * written before events existed carry no type at all, so a missing one still means "fly
+     * there".
      */
     private static void apply(JsonObject reply) {
         MinecraftServer server = running;
@@ -356,10 +362,54 @@ public final class WorldFeed {
                 String type = order.has("type") ? order.get("type").getAsString() : "goto";
                 if ("event".equals(type)) {
                     REPORTS.add(Disasters.strike(levelFor(server, order), order));
+                } else if ("spawn".equals(type)) {
+                    spawnDrone(server, order);
                 } else {
                     sendDrone(server, order);
                 }
             }
+        });
+    }
+
+    /**
+     * Puts a new drone where the dashboard dropped it, and gives it an agent to render it.
+     *
+     * <p>The map is top-down, so a placement from it has no altitude to give: a missing or null
+     * {@code y} means "just above whatever the ground is there", plus a little clearance so the
+     * drone is not spawned inside the block it lands on.
+     *
+     * <p>The agent is deployed as soon as the drone is indexed rather than left to the
+     * supervisor's reconcile pass, so a drone plopped on the map has a camera within a second
+     * instead of within two seconds; if the fleet is already at {@code maxAgents} the deploy
+     * just says so and the drone flies without a feed.
+     *
+     * <p>Server thread only.
+     */
+    private static void spawnDrone(MinecraftServer server, JsonObject order) {
+        ServerLevel level = levelFor(server, order);
+        if (!order.has("x") || !order.has("z")) {
+            return;
+        }
+        double x = order.get("x").getAsDouble();
+        double z = order.get("z").getAsDouble();
+        double y = order.has("y") && !order.get("y").isJsonNull()
+                ? order.get("y").getAsDouble()
+                : level.getHeight(Heightmap.Types.MOTION_BLOCKING, (int) Math.floor(x), (int) Math.floor(z))
+                        + SPAWN_CLEARANCE;
+
+        String id = order.has("id") && !order.get("id").isJsonNull() ? order.get("id").getAsString() : null;
+        float yaw = order.has("yaw") ? order.get("yaw").getAsFloat() : 0.0F;
+        String dimension = level.dimension().identifier().toString();
+
+        DroneManager.spawn(id, new Vec3(x, y, z), dimension, yaw).whenComplete((state, failure) -> {
+            if (failure != null || state == null) {
+                Firekeep.LOGGER.warn("could not place a drone at {}, {}, {}: {}",
+                        x, y, z, failure == null ? "it was never indexed" : failure.getMessage());
+                return;
+            }
+            Firekeep.LOGGER.info("placed drone {} at {}, {}, {} - {}",
+                    state.id(), Math.round(x), Math.round(y), Math.round(z),
+                    AgentSupervisor.deploy(state.id()));
         });
     }
 
@@ -378,6 +428,10 @@ public final class WorldFeed {
         }
         DroneEntity drone = findDrone(server, order.get("id").getAsString());
         if (drone == null) {
+            return;
+        }
+        if (flag(order, "look")) {
+            drone.setCameraPitch((float) number(order, "pitch"));
             return;
         }
         if (flag(order, "hover")) {

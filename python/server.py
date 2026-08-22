@@ -21,6 +21,8 @@ picked. Nothing calls Marble unless a capture, or --backend, asks for it.
     POST /api/events         set off a fire, a storm, an explosion or a dousing
     GET  /api/events         the disaster log, newest first
 
+    POST /api/drones/spawn   put a new drone on the map; the mod gives it an agent
+
     GET  /api/jobs           every job, newest first
     GET  /api/jobs/<id>      one job, including the full world payload
     GET  /api/health         {ok, credits, queued, busy}
@@ -74,6 +76,7 @@ JOBS_BY_ID = {}                         # id -> dict
 WORK = queue.Queue()
 WORLD_LOCK = threading.Lock()
 WORLD_BY_DIM = {}               # dimension -> {meta, png, stamp}
+
 
 # auto-triggered generation should be cheap by default; override with --model
 DEFAULT_MODEL = "marble-1.0-draft"
@@ -483,6 +486,30 @@ class Handler(BaseHTTPRequestHandler):
                                   order.get("up", 0), order.get("yaw", 0))
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 return self.send_json({"error": f"bad order: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
+
+        # Camera gimbal: positive pitch looks down. This is deliberately separate from the
+        # movement stick so an operator can inspect the ground without cancelling a flight.
+        if url.path == "/api/drones/look":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                order = json.loads(self.rfile.read(max(0, length)))
+                queued = live.look(order["id"], order["pitch"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad camera angle: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
+
+        # plop a new drone down where the dashboard clicked; the mod builds it and starts an
+        # agent to render it, and it appears in the feed a flush later like any other drone
+        if url.path == "/api/drones/spawn":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                order = json.loads(self.rfile.read(max(0, length)))
+                queued = live.spawn(order["x"], order["z"], y=order.get("y"),
+                                    drone_id=order.get("id"),
+                                    dimension=order.get("dimension") or "minecraft:overworld")
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad placement: {e}"}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
 
         if url.path == "/api/drones/hover":

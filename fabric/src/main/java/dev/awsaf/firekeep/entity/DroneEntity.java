@@ -159,6 +159,11 @@ public class DroneEntity extends Entity {
         this.targetPitch = Mth.clamp(pitch, -90.0F, 90.0F);
     }
 
+    /** Adjusts only the camera's vertical angle without changing its heading or flight target. */
+    public void setCameraPitch(float pitch) {
+        this.targetPitch = Mth.clamp(pitch, -90.0F, 90.0F);
+    }
+
     public void setYawFollowsMotion(boolean yawFollowsMotion) {
         this.yawFollowsMotion = yawFollowsMotion;
     }

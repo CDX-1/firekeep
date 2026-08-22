@@ -5,6 +5,7 @@ import styles from "./live-monitoring.module.css";
 import { AREAS, type Filter } from "./drones";
 import { CameraIcon, Chevron, EmptyImage } from "./icons";
 import DroneControls from "./drone-controls";
+import FlightTelemetry, { type DroneTrailPoint } from "./flight-telemetry";
 import { detailSizeFor, streamUrl, type Profile, type Size } from "@/lib/cameras";
 import { pauseFrames } from "@/lib/frames";
 import type { Connection } from "@/lib/camera-feed";
@@ -35,12 +36,36 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [controllingId, setControllingId] = useState<string | null>(null);
   const handledRequest = useRef<{ id: string } | null>(null);
+  const trailCache = useRef<Record<string, DroneTrailPoint[]>>({});
+  const [trails, setTrails] = useState<Record<string, DroneTrailPoint[]>>({});
 
   // Streaming by default; polling is the fallback, and a switch the operator can throw.
   const { transport, preferred, choose, connection, error } = useTransport();
   // Flying by hand needs a fresher position than a wall of thumbnails does - which only the
   // polling path has to be told, since the stream already carries the mod's own positions.
   const { drones, reachable, online } = useRoster(transport, controllingId !== null);
+
+  // Keep recent flight history even while another feed is selected. A point only enters when the
+  // drone has moved far enough to make the line useful; a later point at the same location is a
+  // meaningful stop rather than redundant noise.
+  useEffect(() => {
+    const now = Date.now();
+    let changed = false;
+    for (const drone of drones) {
+      const trail = trailCache.current[drone.id] ?? [];
+      const last = trail.at(-1);
+      const distance = last ? Math.hypot(drone.x - last.x, drone.z - last.z) : Infinity;
+      if (!last || distance >= 0.45 || now - last.at >= 4_000) {
+        trail.push({ x: drone.x, z: drone.z, at: now, stopped: Boolean(last && distance < 0.45) });
+        trailCache.current[drone.id] = trail.slice(-48);
+        changed = true;
+      }
+    }
+    if (changed) {
+      setTrails(Object.fromEntries(Object.entries(trailCache.current)
+        .map(([id, trail]) => [id, [...trail]])));
+    }
+  }, [drones]);
 
   const filteredDrones = activeFilter === "All" ? drones : drones.filter((drone) => drone.area === activeFilter);
   const focusedDrone = focusedId ? drones.find((drone) => drone.id === focusedId) ?? null : null;
@@ -175,12 +200,15 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
                 {/* The overlay owns the controls once it is open, so only ever one panel is
                     listening for the keys. */}
                 {focusedDrone?.id === drone.id && selectedId === null && (
-                  <DroneControls
-                    compact
-                    drone={drone}
-                    controlling={controllingId === drone.id}
-                    onToggleControl={toggleControl(drone.id)}
-                  />
+                  <>
+                    <FlightTelemetry drone={drone} trail={trails[drone.id] ?? []} />
+                    <DroneControls
+                      compact
+                      drone={drone}
+                      controlling={controllingId === drone.id}
+                      onToggleControl={toggleControl(drone.id)}
+                    />
+                  </>
                 )}
               </div>
             </article>

@@ -258,6 +258,36 @@ def hover(drone_id):
     return _enqueue({"id": str(drone_id), "hover": True})
 
 
+def look(drone_id, pitch):
+    """Queues a camera-only downward pitch adjustment; it does not alter flight input."""
+    value = _finite(pitch, "pitch")
+    if value < 0 or value > 90:
+        raise ValueError("pitch must be between 0 and 90 degrees")
+    return _enqueue({"id": str(drone_id), "look": True, "pitch": value})
+
+
+def spawn(x, z, *, y=None, drone_id=None, dimension="minecraft:overworld"):
+    """
+    Queues "put a new drone here", travelling the same way an order does.
+
+    The map is top-down and has no altitude to give, so y is optional: the mod drops the drone
+    just above the ground when it is left out. The new drone's id is the mod's to choose, and it
+    shows up in the feed a flush later like any other - there is nothing to return but the depth
+    of the queue it went into.
+    """
+    command = {
+        "type": "spawn",
+        "x": _finite(x, "x"),
+        "z": _finite(z, "z"),
+        "dimension": str(dimension or "minecraft:overworld"),
+    }
+    if y is not None:
+        command["y"] = _finite(y, "y")
+    if drone_id:
+        command["id"] = str(drone_id)
+    return _enqueue(command)
+
+
 def _enqueue(command):
     with _LOCK:
         command["at"] = time.time()

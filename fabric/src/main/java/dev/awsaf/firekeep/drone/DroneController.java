@@ -143,6 +143,14 @@ public final class DroneController {
      * its answer on the same request.
      */
     public void begin(ServerLevel level, DroneEntity drone, DroneCommand command) {
+        // Looking is a camera/gimbal adjustment, not a flight instruction. In particular, an
+        // n8n workflow must be able to tilt the camera down while a move, patrol or follow is
+        // still under way, rather than replacing that active command.
+        if (command.type() == CommandType.LOOK) {
+            look(drone, command);
+            return;
+        }
+
         if (this.active != null && this.active != command) {
             DroneCommand previous = this.active;
             this.active = null;
@@ -186,7 +194,7 @@ public final class DroneController {
                 this.scanPending = true;
             }
             case DISPENSE_WATER -> dispense(level, drone, command);
-            case LOOK -> look(drone, command);
+            case LOOK -> look(drone, command); // handled above; retained for exhaustive dispatch
             case SET_SPEED -> {
                 drone.setMaxSpeed(command.speed() / 20.0D);
                 finish(CommandResult.completed(command, "speed set to " + command.speed() + " blocks/s"));
@@ -261,7 +269,7 @@ public final class DroneController {
             drone.setYawFollowsMotion(false);
             drone.setLook(Compass.yawTowards(delta.x, delta.z),
                     (float) -Math.toDegrees(Math.atan2(delta.y, horizontal)));
-            finish(CommandResult.completed(command, "aimed at target"));
+            command.completion().complete(CommandResult.completed(command, "camera aimed at target"));
             return;
         }
 
@@ -269,12 +277,18 @@ public final class DroneController {
         Float pitch = command.pitch();
         if (yaw == null && pitch == null) {
             drone.setYawFollowsMotion(true);
-            finish(CommandResult.completed(command, "camera released to follow motion"));
+            command.completion().complete(CommandResult.completed(command, "camera released to follow motion"));
             return;
         }
-        drone.setYawFollowsMotion(false);
-        drone.setLook(yaw == null ? drone.getYRot() : yaw, pitch == null ? drone.getXRot() : pitch);
-        finish(CommandResult.completed(command, "aimed"));
+        if (yaw != null) {
+            drone.setYawFollowsMotion(false);
+            drone.setLook(yaw, pitch == null ? drone.getXRot() : pitch);
+        } else {
+            // A pitch-only request is the usual surveillance case. It deliberately leaves yaw
+            // following the active route, so tilting down does not steer or interrupt flight.
+            drone.setCameraPitch(pitch);
+        }
+        command.completion().complete(CommandResult.completed(command, "camera aimed"));
     }
 
     // ---------------------------------------------------------------- flying

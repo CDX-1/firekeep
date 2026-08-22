@@ -118,11 +118,11 @@ existing.
                   "maxReplans": 3, "pathNodeBudget": 4000, "pathSearchRadius": 48,
                   "hazardClearance": 2, "cruiseAltitude": 4 },
   "actions":    { "waterRadius": 3, "placeWaterSource": false,
-                  "fireEventCooldownSeconds": 60, "disasterFireCells": 12 }
+                  "fireEventCooldownSeconds": 300, "disasterFireCells": 12 }
 }
 ```
 
-Environment variables override the file, so one build can be pointed at a different n8n without
+Environment variables override the file, so one build can be pointed at a different n8n webhook without
 editing anything:
 
 | Variable | Overrides |
@@ -142,8 +142,8 @@ Notable knobs:
 - **`flight.hazardClearance`** — set to `0` to let routes pass right beside fire; `2` keeps a buffer.
 - **`actions.placeWaterSource`** — off by default. On, `dispense_water` also leaves a real water
   block, which will then flow and reshape terrain.
-- **`n8n.pushPerception`** — off by default. On, one drone's perception is pushed to the webhook
-  every `perceptionPushIntervalSeconds` in addition to events.
+- **`actions.fireEventCooldownSeconds`** — the shared, per-incident cooldown. Drones all use the
+  same incident ID, so multiple agents observing one fire still produce only one webhook event.
 
 ---
 
@@ -257,7 +257,7 @@ its caller is told so, which is what makes it safe for an AI to change its mind 
 | `return_home` | — | Flies to its stored home. |
 | `follow` | `target`, optional `radius` | Another drone's id, or a player name. Never completes. |
 | `dispense_water` | optional `radius` | Extinguishes fire around the ground below the drone. |
-| `look` | `yaw` + `pitch`, or `at: {x,y,z}` | With no fields, the camera goes back to following motion. |
+| `look` | optional `yaw` and/or `pitch`, or `at: {x,y,z}` | Camera-only: does not interrupt an active move, patrol or follow. Positive pitch looks down; `{"command":"look","pitch":25}` gives a 25° downward angle. With no fields, the camera goes back to following motion. |
 | `patrol` | `waypoints: [{x,y,z}, …]`, optional `loop` | |
 | `set_speed` | `speed` (blocks/second) | |
 | `set_home` | optional `x`, `y`, `z` | Defaults to where it is now. Persists on the entity. |
@@ -268,6 +268,9 @@ Every command also accepts `"await": true` and `"timeout_ms"`.
 Aliases are accepted so a model's phrasing rarely matters: `goto`/`fly_to`/`navigate` → `move_to`,
 `stop`/`hold` → `hover`, `rtb`/`go_home` → `return_home`, `extinguish`/`drop_water` → `dispense_water`,
 `observe`/`perceive` → `scan`, `aim`/`face` → `look`. Directions accept `n`, `ne`, `sw`, …
+
+The dashboard exposes the same camera control as a **Camera down** slider in an expanded drone
+viewer. It forwards the requested pitch through the Python relay without interrupting flight.
 
 ### What the mod handles, not n8n
 
@@ -379,13 +382,13 @@ TTTTttttt..ttt.ttTtt.
 
 ## Events
 
-Pushed to `n8n.webhookUrl` as `POST` with `Content-Type: application/json` and, if `authValue` is
-set, the `authHeader` header. Also kept in a 256-entry ring buffer readable at `GET /api/events`,
-so a flow can be developed before there is a URL for it.
+Pushed directly to `n8n.webhookUrl` as `POST` with `Content-Type: application/json` and, if
+`authValue` is set, the configured `authHeader`. Also kept in a 256-entry mod-local ring buffer at
+`GET /api/events` if the n8n webhook is unavailable.
 
 | `event` | When | Extra fields |
 |---|---|---|
-| `fire_detected` | A drone sees fire or lava it has not reported recently | `hazard`, `size`, `severity`, `direction`, `distance`, `terrain`, `biome`, `location`, `drone_position` |
+| `fire_detected` | A drone sees fire or lava not reported by any agent during the cooldown | `incident_id`, `hazard`, `size`, `severity`, `direction`, `distance`, `terrain`, `biome`, `location` |
 | `disaster_detected` | Same, but the cluster is at least `disasterFireCells` blocks | as above |
 | `drone_arrived` | A movement command completed | `command`, `command_id`, `location` |
 | `drone_stuck` | Replanning stopped helping | `reason`, `replans`, `goal`, `location` |
@@ -402,8 +405,8 @@ Every event carries `event`, `drone_id` and `at` (epoch milliseconds).
   "direction": "east", "distance": 6.34,
   "terrain": "settlement", "biome": "minecraft:snowy_taiga",
   "dimension": "minecraft:overworld",
-  "location": { "x": 4, "y": 71, "z": 0 },
-  "drone_position": { "x": 0.5, "y": 76.42, "z": 0.5 } }
+  "incident_id": "fire:minecraft:overworld:0:8:0",
+  "location": { "x": 4, "y": 71, "z": 0 } }
 ```
 
 **De-duplication matters here.** A forest fire changes state every tick. Sightings are folded onto
@@ -414,34 +417,21 @@ per fire rather than twenty a second.
 
 ## Connecting it to n8n
 
-### 1. Outbound — Minecraft tells n8n something happened
+### Outbound — Minecraft tells n8n something happened
 
-Add a **Webhook** node:
-
-| Setting | Value |
-|---|---|
-| HTTP Method | `POST` |
-| Path | `firekeep` |
-| Authentication | *Header Auth* — name `X-Firekeep-Key`, value your shared secret |
-| Respond | *Immediately* |
-
-Copy its **production URL** into the mod config:
+Create an n8n **Webhook** node that accepts `POST` requests and configure it to respond
+immediately. If you enable Header Auth on that node, use the same name and value below:
 
 ```json
 "n8n": {
   "webhookUrl": "http://127.0.0.1:5678/webhook/firekeep",
   "authHeader": "X-Firekeep-Key",
-  "authValue": "shared-secret-123"
+  "authValue": "shared-secret-123",
+  "events": true
 }
 ```
 
-Route on `{{ $json.event }}` with a **Switch** node: `fire_detected` and `disaster_detected` into
-the dispatch branch, `drone_stuck` and `command_failed` into recovery, the rest into logging.
-
-If you would rather poll than receive, skip the webhook and have a **Schedule Trigger** hit
-`GET /api/events?limit=50`.
-
-### 2. Inbound — n8n tells a drone what to do
+### Inbound — n8n tells a drone what to do
 
 Create one **Header Auth** credential and reuse it on every HTTP Request node:
 name `Authorization`, value `Bearer <DRONE_API_KEY>`.

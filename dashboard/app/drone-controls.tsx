@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import styles from "./drone-controls.module.css";
-import { sendDroneFly, sendDroneHover } from "@/lib/live";
+import { sendDroneFly, sendDroneHover, sendDroneLook } from "@/lib/live";
 import type { DroneCamera } from "@/lib/types";
 
 /**
@@ -55,11 +55,13 @@ export default function DroneControls({
   const [error, setError] = useState<string | null>(null);
   const [flying, setFlying] = useState(false);
   const [held, setHeld] = useState<string[]>([]);
+  const [pitch, setPitch] = useState(25);
 
   const id = useRef(drone.id);
   id.current = drone.id;
   const pressed = useRef(new Set<string>());
   const flyingRef = useRef(false);
+  const pitchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const report = useCallback((cause: unknown) => {
     setError(cause instanceof Error ? cause.message : String(cause));
@@ -117,6 +119,15 @@ export default function DroneControls({
     setHeld([]);
   }, []);
 
+  const setCameraPitch = useCallback((next: number) => {
+    setPitch(next);
+    if (pitchTimer.current !== null) clearTimeout(pitchTimer.current);
+    pitchTimer.current = setTimeout(() => {
+      pitchTimer.current = null;
+      void sendDroneLook(id.current, next).catch(report);
+    }, 120);
+  }, [report]);
+
   // Handing control back, or moving to another drone, must not leave a key stuck down -
   // and a stick that was live has to be cancelled or the drone keeps flying on its own.
   useEffect(() => {
@@ -128,6 +139,7 @@ export default function DroneControls({
     return () => {
       if (flyingRef.current) void sendDroneHover(watched);
       flyingRef.current = false;
+      if (pitchTimer.current !== null) clearTimeout(pitchTimer.current);
     };
   }, [drone.id, controlling, clearKeys]);
 
@@ -214,6 +226,20 @@ export default function DroneControls({
 
       <div className={styles.settings}>
         <div className={styles.topRow}>
+          <label className={styles.pitch}>
+            <span>Camera down</span>
+            <input
+              type="range"
+              min="0"
+              max="90"
+              step="1"
+              value={pitch}
+              disabled={!controlling}
+              onChange={(event) => setCameraPitch(Number(event.target.value))}
+              aria-label="Camera downward angle"
+            />
+            <output>{pitch}°</output>
+          </label>
           <button
             type="button"
             className={styles.take}

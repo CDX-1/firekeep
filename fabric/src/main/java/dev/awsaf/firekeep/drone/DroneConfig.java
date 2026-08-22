@@ -122,7 +122,7 @@ public final class DroneConfig {
         JsonObject actions = child(root, "actions");
         this.waterRadius = clamp(integer(actions, "waterRadius", 3), 1, 16);
         this.placeWaterSource = bool(actions, "placeWaterSource", false);
-        this.fireEventCooldownSeconds = clamp(integer(actions, "fireEventCooldownSeconds", 60), 1, 3600);
+        this.fireEventCooldownSeconds = clamp(integer(actions, "fireEventCooldownSeconds", 300), 1, 3600);
         this.disasterFireCells = clamp(integer(actions, "disasterFireCells", 12), 1, 4096);
     }
 
