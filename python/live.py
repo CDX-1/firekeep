@@ -47,6 +47,11 @@ COMMAND_TTL = 30.0
 EVENT_KINDS = ("fire", "lightning", "explosion", "extinguish")
 #: How many past events are kept for the dashboard's log.
 MAX_EVENTS = 200
+#: Recent observations sent back by a workflow, retained for the camera overlays.
+MAX_DRONE_EVENTS = 400
+#: Events pushed up by the mod - fire sightings, command outcomes - kept so a workflow that
+#: missed a webhook, or started late, can still catch up by polling.
+MAX_MOD_EVENTS = 400
 #: Bounds on what an event may ask for, matching the caps the mod enforces on its own side.
 MAX_EVENT_RADIUS = 128
 MAX_EVENT_INTENSITY = 256
@@ -56,6 +61,8 @@ _WORLDS = {}                      # dimension -> _World
 _SUBSCRIBERS = []                 # list of queue.Queue
 _COMMANDS = []                    # drone orders waiting for the mod to pick them up
 _EVENTS = []                      # the disaster log, oldest first
+_DRONE_EVENTS = []                # workflow observations, newest first
+_MOD_EVENTS = []                  # what Minecraft told us happened, newest first
 
 
 class _World:
@@ -258,6 +265,36 @@ def hover(drone_id):
     return _enqueue({"id": str(drone_id), "hover": True})
 
 
+def look(drone_id, pitch):
+    """Queues a camera-only downward pitch adjustment; it does not alter flight input."""
+    value = _finite(pitch, "pitch")
+    if value < 0 or value > 90:
+        raise ValueError("pitch must be between 0 and 90 degrees")
+    return _enqueue({"id": str(drone_id), "look": True, "pitch": value})
+
+
+def spawn(x, z, *, y=None, drone_id=None, dimension="minecraft:overworld"):
+    """
+    Queues "put a new drone here", travelling the same way an order does.
+
+    The map is top-down and has no altitude to give, so y is optional: the mod drops the drone
+    just above the ground when it is left out. The new drone's id is the mod's to choose, and it
+    shows up in the feed a flush later like any other - there is nothing to return but the depth
+    of the queue it went into.
+    """
+    command = {
+        "type": "spawn",
+        "x": _finite(x, "x"),
+        "z": _finite(z, "z"),
+        "dimension": str(dimension or "minecraft:overworld"),
+    }
+    if y is not None:
+        command["y"] = _finite(y, "y")
+    if drone_id:
+        command["id"] = str(drone_id)
+    return _enqueue(command)
+
+
 def _enqueue(command):
     with _LOCK:
         command["at"] = time.time()
@@ -360,6 +397,114 @@ def events(dimension=None, limit=MAX_EVENTS):
     with _LOCK:
         chosen = [e for e in reversed(_EVENTS) if dimension is None or e["dimension"] == dimension]
         return [dict(e) for e in chosen[:max(0, int(limit))]]
+
+
+def record_drone_event(payload):
+    """Stores one workflow observation for a drone's camera overlay."""
+    if not isinstance(payload, dict):
+        raise ValueError("event must be an object")
+    drone_id = str(payload.get("drone_id") or payload.get("agent_id") or "").strip()
+    if not drone_id:
+        raise ValueError("drone_id is required")
+    kind = str(payload.get("type") or payload.get("event_type") or "observation").strip()[:80]
+    message = str(payload.get("message") or payload.get("summary") or kind).strip()[:500]
+    severity = str(payload.get("severity") or "info").lower()
+    if severity not in {"info", "low", "medium", "high", "critical"}:
+        raise ValueError("severity must be info, low, medium, high, or critical")
+    source_location = payload.get("location") if isinstance(payload.get("location"), dict) else {}
+    location = {
+        "x": source_location.get("x", payload.get("x")),
+        "y": source_location.get("y", payload.get("y")),
+        "z": source_location.get("z", payload.get("z")),
+        "dimension": str(source_location.get("dimension", payload.get("dimension", "minecraft:overworld"))),
+    }
+    for axis in ("x", "y", "z"):
+        if location[axis] is not None:
+            location[axis] = _finite(location[axis], f"location.{axis}")
+    record = {
+        "id": str(payload.get("id") or payload.get("event_id") or uuid.uuid4()),
+        "drone_id": drone_id,
+        "type": kind or "observation",
+        "severity": severity,
+        "message": message or "observation",
+        "location": location,
+        "created": float(payload.get("created") or time.time()),
+    }
+    with _LOCK:
+        # n8n retries webhooks. Event ID is an idempotency key, not a duplicate row.
+        for index, previous in enumerate(_DRONE_EVENTS):
+            if previous["id"] == record["id"]:
+                _DRONE_EVENTS[index] = record
+                break
+        else:
+            _DRONE_EVENTS.insert(0, record)
+        del _DRONE_EVENTS[MAX_DRONE_EVENTS:]
+    return dict(record)
+
+
+def record_mod_event(payload):
+    """
+    Stores one event the mod pushed up, and hands back the normalised record.
+
+    The mod used to POST these straight at an n8n webhook, which meant Minecraft had to hold
+    somebody else's URL and secret. Now it pushes here and this server forwards, so the ring
+    below is both the fallback n8n can poll and the log the dashboard can read.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("event must be an object")
+
+    kind = str(payload.get("event") or payload.get("type") or "").strip()
+    if not kind:
+        raise ValueError("event is required")
+
+    record = dict(payload)
+    record["event"] = kind[:80]
+    record["drone_id"] = str(payload.get("drone_id") or payload.get("agent_id") or "") or None
+    record["id"] = str(payload.get("id") or f"mc-{uuid.uuid4().hex[:10]}")
+    # The mod stamps wall-clock milliseconds; keep both so a consumer can use either.
+    at = payload.get("at") or payload.get("timestamp")
+    record["at"] = float(at) if isinstance(at, (int, float)) else time.time() * 1000.0
+    record["received"] = time.time()
+
+    with _LOCK:
+        for index, previous in enumerate(_MOD_EVENTS):
+            if previous["id"] == record["id"]:
+                _MOD_EVENTS[index] = record
+                break
+        else:
+            _MOD_EVENTS.insert(0, record)
+        del _MOD_EVENTS[MAX_MOD_EVENTS:]
+        subscribers = list(_SUBSCRIBERS)
+
+    # The dashboard watches the same stream for disasters, so a fire the mod spotted on its
+    # own shows up there without a second connection.
+    for sink in subscribers:
+        try:
+            sink.put_nowait(("mod", dict(record)))
+        except queue.Full:
+            pass
+    return dict(record)
+
+
+def mod_events(limit=50, kind=None, drone_id=None, since=None):
+    """The mod's events, newest first, optionally filtered the way a workflow wants them."""
+    with _LOCK:
+        chosen = list(_MOD_EVENTS)
+    if kind:
+        wanted = {k.strip() for k in str(kind).split(",") if k.strip()}
+        chosen = [e for e in chosen if e["event"] in wanted]
+    if drone_id:
+        chosen = [e for e in chosen if e.get("drone_id") == str(drone_id)]
+    if since is not None:
+        chosen = [e for e in chosen if e["at"] > float(since)]
+    return [dict(e) for e in chosen[:max(0, min(int(limit), MAX_MOD_EVENTS))]]
+
+
+def drone_events(drone_id, limit=8):
+    """Newest workflow observations for one drone, for its feed overlay."""
+    with _LOCK:
+        return [dict(event) for event in _DRONE_EVENTS
+                if event["drone_id"] == str(drone_id)][:max(0, min(int(limit), 50))]
 
 
 def _absorb_reports_locked(reports):

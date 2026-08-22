@@ -27,8 +27,8 @@
           "assignments": [
             {
               "id": "f0",
-              "name": "droneApi",
-              "value": "http://127.0.0.1:8090",
+              "name": "hub",
+              "value": "http://127.0.0.1:8000",
               "type": "string"
             },
             {
@@ -60,7 +60,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ $('Config').first().json.droneApi }}/api/drones",
+        "url": "={{ $('Config').first().json.hub }}/api/fleet/drones",
         "options": {
           "timeout": 20000,
           "response": {
@@ -98,7 +98,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $('Config').first().json.droneApi }}/api/drones/{{ $json.drone_id }}/command",
+        "url": "={{ $('Config').first().json.hub }}/api/fleet/drones/{{ $json.drone_id }}/command",
         "options": {
           "timeout": 20000,
           "response": {

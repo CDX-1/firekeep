@@ -46,9 +46,13 @@
 
 /* The bar across the top: what the drone was last told, then the controls for saying it. */
 .settings { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
-.topRow { order: 2; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
+.topRow { order: 2; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; margin-left: auto; }
 .take { height: 26px; padding: 0 12px; font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
 .take[data-on="true"] { color: #eaf5f1; background: rgba(58, 96, 86, .9); outline-color: var(--accent); }
+.pitch { display: grid; grid-template-columns: auto 74px 28px; align-items: center; gap: 6px; height: 26px; padding: 0 8px; color: #c9d2cd; background: rgba(12, 15, 13, .58); border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; white-space: nowrap; }
+.pitch input { width: 74px; margin: 0; accent-color: #8fb8ae; cursor: pointer; }
+.pitch input:disabled { cursor: default; opacity: .45; }
+.pitch output { color: #eaf5f1; font-variant-numeric: tabular-nums; text-align: right; }
 
 .status { order: 1; flex: 0 1 auto; margin: 0; padding: 6px 9px; overflow: hidden; color: #c9d2cd; background: rgba(12, 15, 13, .58); border-radius: 6px; backdrop-filter: blur(7px); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; opacity: 0; transition: opacity 160ms ease; }
 .controls:hover .status, .controls:focus-within .status, .controls[data-controlling="true"] .status { opacity: 1; }
@@ -58,6 +62,7 @@
 .controls[data-compact="true"] { padding: 7px; gap: 6px; }
 .controls[data-compact="true"] .pad, .controls[data-compact="true"] .altitude { display: none; }
 .controls[data-compact="true"] .status { font-size: 9px; }
+.controls[data-compact="true"] .pitch { display: none; }
 
 @media (max-width: 720px) {
   .controls { padding: 8px; gap: 7px; }
@@ -65,6 +70,8 @@
   .altitude button { height: 28px; }
   .altitude button span { display: none; }
   .status { display: none; }
+  .pitch span { display: none; }
+  .pitch { grid-template-columns: 74px 28px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

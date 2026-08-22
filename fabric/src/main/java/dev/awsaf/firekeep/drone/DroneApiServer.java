@@ -23,7 +23,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * The HTTP face of the fleet - the only thing n8n ever talks to.
+ * The HTTP face of the fleet - and, since the python hub took over as the one exposed process,
+ * something only the hub ever talks to.
  *
  * <pre>
  * GET    /api/health
@@ -43,8 +44,9 @@ import java.util.concurrent.TimeoutException;
  * {@link DroneManager} publishes; anything that has to touch the game is queued and, if the caller
  * asked to wait, awaited with a timeout. Nothing here can stall a tick.
  *
- * <p>Bound to loopback by default and gated on a bearer token, because this is a remote control
- * for a running server, not a status page.
+ * <p>Bound to loopback and gated on a bearer token, because this is a remote control for a
+ * running server, not a status page. Nothing outside this machine should be able to reach it:
+ * a workflow that wants a drone moved asks the hub, which asks this.
  */
 public final class DroneApiServer {
     private static final Gson GSON = new Gson();
@@ -211,13 +213,14 @@ public final class DroneApiServer {
         if (current != null) {
             json.addProperty("perception_radius", current.perceptionRadius);
             json.addProperty("perception_vertical_radius", current.perceptionVerticalRadius);
-            json.addProperty("webhook_configured", current.hasWebhook());
+            json.addProperty("events_enabled", current.eventsEnabled);
         }
-        N8nClient client = DroneManager.n8n();
+        HubClient client = DroneManager.hub();
         if (client != null) {
-            json.addProperty("webhook_online", client.isOnline());
+            json.addProperty("hub_url", client.endpoint());
+            json.addProperty("hub_online", client.isOnline());
             if (client.lastError() != null) {
-                json.addProperty("webhook_error", client.lastError());
+                json.addProperty("hub_error", client.lastError());
             }
         }
         json.addProperty("drones", DroneManager.roster().size());

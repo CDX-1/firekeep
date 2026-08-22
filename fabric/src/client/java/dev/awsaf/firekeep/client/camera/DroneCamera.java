@@ -15,6 +15,7 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.world.entity.Entity;
+import org.joml.Vector4f;
 
 import java.util.function.Consumer;
 
@@ -33,6 +34,12 @@ import java.util.function.Consumer;
 public final class DroneCamera {
     /** Rendered at DeltaTracker.ONE: no interpolation, the drone exactly where the last tick left it. */
     private static final DeltaTracker DELTA = DeltaTracker.ONE;
+
+    /** Opaque black behind the sky, so a frame that renders nothing is black rather than garbage. */
+    private static final Vector4f CLEAR_COLOR = new Vector4f(0.0F, 0.0F, 0.0F, 1.0F);
+
+    /** Vanilla clears depth to zero - the projection is reversed-Z, so zero is the far plane. */
+    private static final double CLEAR_DEPTH = 0.0D;
 
     /** A read-back that has not landed by now is never going to; every feed waits on it, so give up. */
     private static final long READBACK_TIMEOUT_MILLIS = 2_000L;
@@ -138,6 +145,7 @@ public final class DroneCamera {
         boolean queued = false;
         try {
             RenderTarget scratch = target(slot, width, height);
+            clear(scratch);
 
             renderer.firekeep$setMainRenderTarget(scratch);
             // The projection and the frustum are both derived from the window, not from the target.
@@ -181,6 +189,21 @@ public final class DroneCamera {
             }
         }
         return queued;
+    }
+
+    /**
+     * Wipes the target before rendering into it.
+     *
+     * <p>{@code renderLevel} does not clear anything - vanilla clears the main target at the top of
+     * {@code GameRenderer.render}, one step above it, and a capture never goes through that path.
+     * So without this a slot still holds the colour and, worse, the depth of whatever it was last
+     * used for: a different drone, {@code CameraConfig.PIPELINE} captures ago. Stale depth is what
+     * makes it visible, because the sky is drawn at the far plane and loses the depth test against
+     * any terrain left in the buffer - so the sky comes and goes as the slots cycle.
+     */
+    private static void clear(RenderTarget scratch) {
+        RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
+                scratch.getColorTexture(), CLEAR_COLOR, scratch.getDepthTexture(), CLEAR_DEPTH);
     }
 
     /**

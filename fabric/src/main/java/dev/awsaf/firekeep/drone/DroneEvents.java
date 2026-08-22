@@ -12,11 +12,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The mod's outbound notice board: everything n8n should be woken up for goes through here.
+ * The mod's outbound notice board: every agent detection and drone outcome goes through here.
  *
- * <p>Two consumers, deliberately. Events are pushed to the configured webhook so a flow can react
- * within a second, and kept in a short ring buffer so {@code GET /api/events} still works when no
- * webhook is configured at all - which is how you develop a flow before you have a URL for it.
+ * <p>Two consumers, deliberately. Events are pushed to the hub, which decides who else hears
+ * about them, and kept in a short ring buffer so {@code GET /api/events} still answers when the
+ * hub is down.
  *
  * <p>The interesting work is suppression. A forest fire changes state every tick, and an agent
  * that receives {@code fire_detected} twenty times a second is worse than one that receives it
@@ -28,17 +28,17 @@ public final class DroneEvents {
     private static final int DEDUP_GRID = 8;
 
     private static final Deque<DroneEvent> RECENT = new ArrayDeque<>();
-    private static final Map<Long, Long> REPORTED = new HashMap<>();
+    private static final Map<String, Long> REPORTED = new HashMap<>();
 
     private static volatile DroneConfig config;
-    private static volatile N8nClient client;
+    private static volatile HubClient client;
 
     private DroneEvents() {
     }
 
-    public static void start(DroneConfig droneConfig, N8nClient n8nClient) {
+    public static void start(DroneConfig droneConfig, HubClient eventClient) {
         config = droneConfig;
-        client = n8nClient;
+        client = eventClient;
         synchronized (RECENT) {
             RECENT.clear();
             REPORTED.clear();
@@ -54,9 +54,9 @@ public final class DroneEvents {
             }
         }
 
-        N8nClient sink = client;
+        HubClient sink = client;
         DroneConfig current = config;
-        if (sink != null && current != null && current.hasWebhook()) {
+        if (sink != null && current != null && current.eventsEnabled) {
             sink.send(record.toJson());
         }
         Firekeep.LOGGER.debug("drone event {} ({})", event, droneId);
@@ -94,7 +94,8 @@ public final class DroneEvents {
             if (!hazard.type().equals(BlockClass.FIRE.label()) && !hazard.type().equals(BlockClass.LAVA.label())) {
                 continue;
             }
-            if (!claim(hazard.x(), hazard.y(), hazard.z(), current.fireEventCooldownSeconds)) {
+            String incidentId = incidentId(hazard.type(), snapshot.dimension(), hazard.x(), hazard.y(), hazard.z());
+            if (!claim(incidentId, current.fireEventCooldownSeconds)) {
                 continue;
             }
 
@@ -108,14 +109,13 @@ public final class DroneEvents {
             payload.addProperty("terrain", snapshot.terrain());
             payload.addProperty("biome", snapshot.biome());
             payload.addProperty("dimension", snapshot.dimension());
+            payload.addProperty("incident_id", incidentId);
 
             JsonObject location = new JsonObject();
             location.addProperty("x", hazard.x());
             location.addProperty("y", hazard.y());
             location.addProperty("z", hazard.z());
             payload.add("location", location);
-            payload.add("drone_position", PerceptionSnapshot.vec(snapshot.position()));
-
             emit(disaster ? "disaster_detected" : "fire_detected", snapshot.droneId(), payload);
         }
     }
@@ -125,20 +125,25 @@ public final class DroneEvents {
      *
      * @return true the first time a cell is claimed, and again once the cooldown has elapsed
      */
-    private static boolean claim(int x, int y, int z, int cooldownSeconds) {
-        long key = (((long) Math.floorDiv(x, DEDUP_GRID) & 0x1FFFFF) << 42)
-                | (((long) Math.floorDiv(y, DEDUP_GRID) & 0x1FFFFF) << 21)
-                | ((long) Math.floorDiv(z, DEDUP_GRID) & 0x1FFFFF);
+    private static boolean claim(String incidentId, int cooldownSeconds) {
         long now = System.currentTimeMillis();
 
         synchronized (REPORTED) {
             REPORTED.entrySet().removeIf(entry -> entry.getValue() < now);
-            Long until = REPORTED.get(key);
+            Long until = REPORTED.get(incidentId);
             if (until != null) {
                 return false;
             }
-            REPORTED.put(key, now + cooldownSeconds * 1000L);
+            REPORTED.put(incidentId, now + cooldownSeconds * 1000L);
             return true;
         }
+    }
+
+    /** Stable across agents: all sightings in the same dimension/grid cell name one incident. */
+    private static String incidentId(String type, String dimension, int x, int y, int z) {
+        return type + ":" + dimension + ":"
+                + Math.floorDiv(x, DEDUP_GRID) + ":"
+                + Math.floorDiv(y, DEDUP_GRID) + ":"
+                + Math.floorDiv(z, DEDUP_GRID);
     }
 }

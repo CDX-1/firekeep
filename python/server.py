@@ -21,6 +21,13 @@ picked. Nothing calls Marble unless a capture, or --backend, asks for it.
     POST /api/events         set off a fire, a storm, an explosion or a dousing
     GET  /api/events         the disaster log, newest first
 
+    POST /api/drones/spawn   put a new drone on the map; the mod gives it an agent
+
+    ANY  /api/fleet/*        the mod's control API, proxied: /api/fleet/drones,
+                             /api/fleet/drones/<id>/perception, /api/fleet/dispatch, ...
+    POST /api/mod/events     Minecraft reporting something; forwarded on to n8n
+    GET  /api/mod/events     those reports, newest first, for a workflow that missed one
+
     GET  /api/jobs           every job, newest first
     GET  /api/jobs/<id>      one job, including the full world payload
     GET  /api/health         {ok, credits, queued, busy}
@@ -33,17 +40,28 @@ picked. Nothing calls Marble unless a capture, or --backend, asks for it.
     GET  /latest.png         the most recent finished render
     GET  /                   the viewer
 
-This is the midpoint: the dashboard talks to this and nothing else, and everything
-that has to reach Minecraft - the save, the mod's feed, the camera agents - is reached
-from here.
+This is the hub, and the only process anything outside this machine talks to. n8n reaches
+Minecraft through /api/fleet/*, Minecraft reports back through /api/mod/events, the dashboard
+reads everything else, and the mod's own control API stays on loopback where it belongs.
+
+    n8n  ──▶ (tunnel) ──▶ server.py ──▶ 127.0.0.1:8090   the mod's control API
+                              │  ▲
+    dashboard ────────────────┘  └───  the mod's world feed and event pushes
+                              └──────▶ n8n webhooks, World Labs, the camera agents
+
+Set FIREKEEP_API_KEY to gate it: every /api route except /api/health then wants
+`Authorization: Bearer <key>` from anything that did not come from this machine.
 
 Every finished job also drops a plain PNG in out/renders/, and copies it to
 out/latest.png, so there is always one obvious file to look at.
 """
 
 import argparse
+import ipaddress
 import json
+import os
 import queue
+import secrets
 import shutil
 import sys
 import threading
@@ -58,6 +76,8 @@ from urllib.parse import urlparse, parse_qs, unquote
 import cameras
 import live
 import marble
+import minecraft
+import n8n
 import wildfire
 import worldmap
 
@@ -69,11 +89,13 @@ LATEST = OUT / "latest.png"      # ...and the newest one, always at the same pat
 WORLD = OUT / "world"            # cached top-down maps, one PNG per dimension
 
 MAX_UPLOAD = 32 * 1024 * 1024          # 32 MB is far above any screenshot
+MAX_BODY = 256 * 1024                  # a JSON command, not an image
 JOBS_LOCK = threading.Lock()
 JOBS_BY_ID = {}                         # id -> dict
 WORK = queue.Queue()
 WORLD_LOCK = threading.Lock()
 WORLD_BY_DIM = {}               # dimension -> {meta, png, stamp}
+
 
 # auto-triggered generation should be cheap by default; override with --model
 DEFAULT_MODEL = "marble-1.0-draft"
@@ -92,6 +114,14 @@ CREDITS_CACHE = {"at": 0.0, "value": None}
 # --dry-run: captures are accepted and echoed back, nothing is ever generated.
 # Not the same as "no API key" - a wildfire job never needs one.
 DRY_RUN = False
+
+# The shared secret the outside world - which in practice means n8n - has to present. Empty
+# leaves the API open, which is right for a laptop and wrong for anything with a tunnel on it.
+API_KEY = ""
+#: Reachable without the key, so a probe through the tunnel can tell "down" from "rejected".
+OPEN_PATHS = ("/api/health",)
+#: Everything under here is handed to the mod's own control API, verb, query and body intact.
+FLEET_PREFIX = "/api/fleet"
 
 
 def now():
@@ -423,9 +453,114 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # -- who is asking -------------------------------------------------------
+    def is_local(self):
+        """
+        True for a caller on this machine that did not arrive through a proxy.
+
+        The socket being loopback proves nothing on its own: cloudflared runs here too, so a
+        request from the other side of the world also arrives from 127.0.0.1. What separates
+        them is that a proxy says who it is forwarding for, and this one does not trust a
+        forwarded chain that starts outside the LAN.
+        """
+        peer = (self.client_address[0] or "").split("%")[0]
+        try:
+            if not ipaddress.ip_address(peer).is_loopback:
+                return False
+        except ValueError:
+            return False
+
+        forwarded = (self.headers.get("CF-Connecting-IP")
+                     or self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if not forwarded:
+            return True
+        try:
+            origin = ipaddress.ip_address(forwarded)
+        except ValueError:
+            return False
+        return origin.is_loopback or origin.is_private
+
+    def authorised(self, path):
+        if not API_KEY or path in OPEN_PATHS or not path.startswith("/api"):
+            return True
+        header = (self.headers.get("Authorization") or "").strip()
+        presented = header[7:].strip() if header[:7].lower() == "bearer " else ""
+        presented = presented or (self.headers.get("X-API-Key") or "").strip()
+        if presented and secrets.compare_digest(presented, API_KEY):
+            return True
+        return self.is_local()
+
+    def gate(self):
+        """Answers 401 and returns False if this caller may not be here."""
+        if self.authorised(urlparse(self.path).path):
+            return True
+        self.send_json({"ok": False, "error": "missing or invalid API key; send "
+                                              "Authorization: Bearer <FIREKEEP_API_KEY>"},
+                       HTTPStatus.UNAUTHORIZED)
+        return False
+
+    # -- /api/fleet/* --------------------------------------------------------
+    def fleet(self, method):
+        """
+        Hands one call straight through to the mod, and its answer straight back.
+
+        Deliberately a pass-through rather than a curated set of endpoints: the mod's control
+        API is the contract a workflow already knows, and re-declaring every route here would
+        mean two places to change every time a drone learns a new trick. What this adds is the
+        parts a workflow should not have to hold - where Minecraft is, and its bearer token.
+        """
+        url = urlparse(self.path)
+        path = url.path[len(FLEET_PREFIX):] or "/"
+        query = {k: v[0] for k, v in parse_qs(url.query).items()}
+
+        body = None
+        if method == "POST":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                return self.send_json({"error": f"body over {MAX_BODY} bytes"},
+                                      HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                return self.send_json({"error": "body must be JSON"}, HTTPStatus.BAD_REQUEST)
+
+        # ?wait=true asks the mod to hold the reply until the drone has finished, which is a
+        # flight rather than a request - so the timeout has to be a flight's worth of patience.
+        waiting = str(query.get("wait", "")).lower() in ("1", "true", "yes")
+        try:
+            payload = minecraft.request(method, path, body, query=query,
+                                        timeout=minecraft.LONG_TIMEOUT if waiting
+                                        else minecraft.DEFAULT_TIMEOUT)
+        except minecraft.MinecraftError as e:
+            return self.send_json({"ok": False, "error": str(e)}, e.status)
+        return self.send_json(payload)
+
     # -- POST /capture ------------------------------------------------------
     def do_POST(self):
         url = urlparse(self.path)
+        if not self.gate():
+            return
+
+        # n8n reaching Minecraft. This is the whole inbound control surface: everything the
+        # mod's own API offers, behind this server's key rather than the mod's.
+        if url.path == FLEET_PREFIX or url.path.startswith(FLEET_PREFIX + "/"):
+            return self.fleet("POST")
+
+        # Minecraft reporting something - a fire spotted, an order finished. It used to POST
+        # these at n8n directly, which meant the mod had to hold somebody else's webhook URL
+        # and secret; now it tells us, and we forward.
+        if url.path == "/api/mod/events":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > MAX_BODY:
+                return self.send_json({"error": "bad body length"}, HTTPStatus.BAD_REQUEST)
+            try:
+                event = live.record_mod_event(json.loads(self.rfile.read(length)))
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                return self.send_json({"error": f"bad mod event: {e}"}, HTTPStatus.BAD_REQUEST)
+            forwarded = n8n.notify(event)
+            return self.send_json({"ok": True, "event": event, "forwarded": forwarded},
+                                  HTTPStatus.ACCEPTED)
 
         # the mod's live world feed: every surface column that just changed
         if url.path == "/api/live":
@@ -440,6 +575,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True, "columns": len(delta["columns"]) // 3,
                                    "hot": delta["hot"], "watchers": live.subscriber_count(),
                                    "commands": commands})
+
+        # A workflow's conclusion about what a drone saw. This never controls Minecraft; it is
+        # retained for, and displayed on, that drone's video feed.
+        if url.path == "/api/drone-events":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > MAX_UPLOAD:
+                return self.send_json({"error": "bad body length"}, HTTPStatus.BAD_REQUEST)
+            try:
+                event = live.record_drone_event(json.loads(self.rfile.read(length)))
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                return self.send_json({"error": f"bad drone event: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "event": event}, HTTPStatus.ACCEPTED)
 
         # set off a disaster; same channel as a drone order, and the outcome comes back
         # on the push after the one that collected it
@@ -483,6 +630,30 @@ class Handler(BaseHTTPRequestHandler):
                                   order.get("up", 0), order.get("yaw", 0))
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 return self.send_json({"error": f"bad order: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
+
+        # Camera gimbal: positive pitch looks down. This is deliberately separate from the
+        # movement stick so an operator can inspect the ground without cancelling a flight.
+        if url.path == "/api/drones/look":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                order = json.loads(self.rfile.read(max(0, length)))
+                queued = live.look(order["id"], order["pitch"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad camera angle: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
+
+        # plop a new drone down where the dashboard clicked; the mod builds it and starts an
+        # agent to render it, and it appears in the feed a flush later like any other drone
+        if url.path == "/api/drones/spawn":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                order = json.loads(self.rfile.read(max(0, length)))
+                queued = live.spawn(order["x"], order["z"], y=order.get("y"),
+                                    drone_id=order.get("id"),
+                                    dimension=order.get("dimension") or "minecraft:overworld")
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad placement: {e}"}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
 
         if url.path == "/api/drones/hover":
@@ -572,7 +743,8 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     continue
 
-                if data.get("dimension") != dimension:
+                # a mod event does not necessarily name a dimension; only filter what does
+                if data.get("dimension") not in (None, dimension):
                     continue
                 idle = time.monotonic()
                 self.wfile.write(live.sse(event, data))
@@ -668,9 +840,46 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             upstream.close()
 
+    # -- DELETE --------------------------------------------------------------
+    def do_DELETE(self):
+        """Only the fleet has anything to retire; nothing else here deletes."""
+        path = urlparse(self.path).path
+        if not self.gate():
+            return
+        if path.startswith(FLEET_PREFIX + "/"):
+            return self.fleet("DELETE")
+        self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    # -- OPTIONS -------------------------------------------------------------
+    def do_OPTIONS(self):
+        """CORS preflight, so a browser-side workflow node can call this directly."""
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     # -- GET ----------------------------------------------------------------
     def do_GET(self):
         path = urlparse(self.path).path
+        if not self.gate():
+            return
+
+        if path == FLEET_PREFIX or path.startswith(FLEET_PREFIX + "/"):
+            return self.fleet("GET")
+
+        if path == "/api/mod/events":
+            q = parse_qs(urlparse(self.path).query)
+            one = lambda k, d=None: (q.get(k) or [d])[0]
+            try:
+                return self.send_json({"events": live.mod_events(
+                    limit=int(one("limit", 50)), kind=one("event"),
+                    drone_id=one("drone_id"),
+                    since=None if one("since") is None else float(one("since")))})
+            except ValueError:
+                return self.send_json({"error": "limit and since must be numbers"},
+                                      HTTPStatus.BAD_REQUEST)
 
         if path == "/api/health":
             bal = credit_balance(self.server) if self.server.backend == "marble" else None
@@ -684,7 +893,12 @@ class Handler(BaseHTTPRequestHandler):
                                    "backends": list(BACKENDS),
                                    "dry_run": DRY_RUN,
                                    "live": feed["live"], "watchers": live.subscriber_count(),
-                                   "cameras": cameras.status()})
+                                   "cameras": cameras.status(),
+                                   # the two links this process is the middle of
+                                   "minecraft": dict(minecraft.configured(),
+                                                     online=minecraft.online()),
+                                   "n8n": n8n.status(),
+                                   "secured": bool(API_KEY)})
 
         if path == "/api/jobs":
             with JOBS_LOCK:
@@ -729,6 +943,17 @@ class Handler(BaseHTTPRequestHandler):
             feed = live.snapshot(where)
             return self.send_json({"events": live.events(where), "live": feed["live"],
                                    "kinds": list(live.EVENT_KINDS)})
+
+        if path == "/api/drone-events":
+            q = parse_qs(urlparse(self.path).query)
+            drone_id = (q.get("drone_id") or [""])[0]
+            if not drone_id:
+                return self.send_json({"error": "drone_id is required"}, HTTPStatus.BAD_REQUEST)
+            try:
+                limit = int((q.get("limit") or [8])[0])
+                return self.send_json({"events": live.drone_events(drone_id, limit)})
+            except ValueError:
+                return self.send_json({"error": "limit must be an integer"}, HTTPStatus.BAD_REQUEST)
 
         if path == "/api/world/stream":
             q = parse_qs(urlparse(self.path).query)
@@ -836,13 +1061,31 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="accept captures but never call the API - for wiring up the mod")
     ap.add_argument("--workers", type=int, default=1, help="concurrent generations")
+    ap.add_argument("--api-key", default=None, metavar="KEY",
+                    help="require this bearer token on /api from anything off this machine "
+                         "(default: $FIREKEEP_API_KEY; unset leaves the API open)")
+    ap.add_argument("--minecraft", default=None, metavar="URL",
+                    help=f"the mod's control API (default: $FIREKEEP_MINECRAFT, else "
+                         f"{minecraft.DEFAULT_URL})")
     args = ap.parse_args()
 
     # keep logs live when stdout is a file or a pipe
     sys.stdout.reconfigure(line_buffering=True)
 
-    global DRY_RUN
+    global DRY_RUN, API_KEY
     DRY_RUN = args.dry_run
+
+    # .env is where the keys for both sides live: WORLDLABS_API_KEY for the marble backend,
+    # DRONE_API_KEY for the mod, FIREKEEP_N8N_* for the workflows, FIREKEEP_API_KEY for us.
+    marble.load_env()
+    if args.minecraft:
+        os.environ["FIREKEEP_MINECRAFT"] = args.minecraft
+    API_KEY = (args.api_key if args.api_key is not None
+               else os.environ.get("FIREKEEP_API_KEY", "")).strip()
+
+    # Start the outbox up front, so the first event the mod pushes is delivered rather than
+    # being the one that pays for the thread.
+    n8n.start()
 
     # only the marble backend needs a key, so a wildfire-only server may start without one
     key = None
@@ -878,7 +1121,14 @@ def main():
     httpd.backend = args.backend
     httpd.save = worldmap.find_save(args.save)
 
-    print(f"\nfirekeep capture server  http://{args.host}:{args.port}")
+    print(f"\nfirekeep hub  http://{args.host}:{args.port}")
+    print(f"  minecraft {minecraft.base_url()}"
+          f"{'' if minecraft.api_key() else '  (no DRONE_API_KEY set)'}  ->  /api/fleet/*")
+    print(f"  n8n       {n8n.events_url() or '<forwarding off>'}  <-  /api/mod/events")
+    if API_KEY:
+        print("  api key   required off this machine (Authorization: Bearer ...)")
+    else:
+        print("  api key   NONE - fine on a laptop, not behind a tunnel; set FIREKEEP_API_KEY")
     if DRY_RUN:
         print("  DRY RUN - captures are accepted but nothing is generated")
     elif args.backend == "wildfire":

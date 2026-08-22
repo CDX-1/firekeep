@@ -8,6 +8,7 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
 import net.minecraft.world.level.GameType;
 import net.minecraft.world.level.gamerules.GameRules;
 
@@ -34,6 +35,8 @@ public final class DroneAgents {
 
     /** Below this, the drone has not really moved and a teleport packet would be wasted. */
     private static final double MOVE_EPSILON_SQR = 1.0E-4D;
+    /** Small enough to preserve the camera aim, large enough to avoid needless correction packets. */
+    private static final float ROTATION_EPSILON = 0.01F;
 
     /** Player uuid to drone id. Touched only from the server thread, but joins arrive off it. */
     private static final Map<UUID, String> ASSIGNMENTS = new ConcurrentHashMap<>();
@@ -144,19 +147,28 @@ public final class DroneAgents {
 
     private static void follow(ServerPlayer player, DroneEntity drone) {
         if (player.level() != drone.level()) {
-            player.teleportTo((ServerLevel) drone.level(), drone.getX(), drone.getY(), drone.getZ(),
-                    Set.of(), drone.getYRot(), drone.getXRot(), false);
+            moveCameraToDrone(player, drone);
             makeSpectator(player);
             return;
         }
 
-        // A hovering drone would otherwise cost a teleport packet every tick for no movement.
-        if (player.position().distanceToSqr(drone.position()) <= MOVE_EPSILON_SQR) {
+        // The agent is the camera the dashboard actually captures. It must inherit rotation as
+        // well as position: a pitch-only gimbal command leaves the drone hovering, so a
+        // position-only follower would otherwise keep filming horizontally.
+        boolean moved = player.position().distanceToSqr(drone.position()) > MOVE_EPSILON_SQR;
+        boolean turned = Math.abs(Mth.wrapDegrees(player.getYRot() - drone.getYRot())) > ROTATION_EPSILON
+                || Math.abs(player.getXRot() - drone.getXRot()) > ROTATION_EPSILON;
+        if (!moved && !turned) {
             return;
         }
 
         // teleportTo rather than setPos: it is what updates the server's chunk tracking for this
         // player, and that tracking is exactly what decides which chunks the agent gets sent.
-        player.teleportTo(drone.getX(), drone.getY(), drone.getZ());
+        moveCameraToDrone(player, drone);
+    }
+
+    private static void moveCameraToDrone(ServerPlayer player, DroneEntity drone) {
+        player.teleportTo((ServerLevel) drone.level(), drone.getX(), drone.getY(), drone.getZ(),
+                Set.of(), drone.getYRot(), drone.getXRot(), false);
     }
 }

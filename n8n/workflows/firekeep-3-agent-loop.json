@@ -24,8 +24,8 @@
           "assignments": [
             {
               "id": "f0",
-              "name": "droneApi",
-              "value": "http://127.0.0.1:8090",
+              "name": "hub",
+              "value": "http://127.0.0.1:8000",
               "type": "string"
             },
             {
@@ -58,7 +58,7 @@
         -360,
         0
       ],
-      "notes": "droneApi: where the mod is reachable from THIS n8n (a tunnel URL on n8n Cloud). llmUrl/llmModel: any OpenAI-compatible chat-completions endpoint. maxSteps caps how many commands one mission may spend."
+      "notes": "hub: where the mod is reachable from THIS n8n (a tunnel URL on n8n Cloud). llmUrl/llmModel: any OpenAI-compatible chat-completions endpoint. maxSteps caps how many commands one mission may spend."
     },
     {
       "parameters": {
@@ -109,7 +109,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $('Config').first().json.droneApi }}/api/dispatch",
+        "url": "={{ $('Config').first().json.hub }}/api/fleet/dispatch",
         "options": {
           "timeout": 20000,
           "response": {
@@ -162,7 +162,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ $('Config').first().json.droneApi }}/api/drones/{{ $json.drone_id }}/perception?fresh=true",
+        "url": "={{ $('Config').first().json.hub }}/api/fleet/drones/{{ $json.drone_id }}/perception?fresh=true",
         "options": {
           "timeout": 20000,
           "response": {
@@ -187,7 +187,7 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ $('Config').first().json.droneApi }}/api/drones",
+        "url": "={{ $('Config').first().json.hub }}/api/fleet/drones",
         "options": {
           "timeout": 20000,
           "response": {
@@ -266,7 +266,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $('Config').first().json.droneApi }}/api/drones/{{ $json.drone_id }}/command",
+        "url": "={{ $('Config').first().json.hub }}/api/fleet/drones/{{ $json.drone_id }}/command",
         "options": {
           "timeout": 20000,
           "response": {

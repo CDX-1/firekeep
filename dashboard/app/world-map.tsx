@@ -8,7 +8,7 @@ import type { WorldMeta } from "@/lib/types";
 import { fallbackWorld } from "./fallback-world";
 import { areaOf } from "@/lib/cameras";
 import { LiveLayer } from "./live-layer";
-import { DIMENSION, getLive, liveMapUrl, sendDroneTo, streamUrl,
+import { DIMENSION, getLive, liveMapUrl, sendDroneTo, spawnDrone, streamUrl,
          type LiveDelta, type LiveDrone, type LiveSnapshot } from "@/lib/live";
 import Simulator from "./simulator";
 import { EVENT_INFO, getEvents, isPending, mergeEvents, simulate,
@@ -68,7 +68,7 @@ type Backdrop = { meta: WorldMeta; image: CanvasImageSource; real: boolean };
 export type MapMode = "drones" | "simulate";
 
 /** How the placement circle is aimed, so the render loop can read it without restarting. */
-type SimSettings = { mode: MapMode; tool: EventKind; radius: number };
+type SimSettings = { mode: MapMode; tool: EventKind; radius: number; placing: boolean };
 
 type WorldMapProps = {
   active: boolean;
@@ -89,7 +89,7 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
   const sessionRef = useRef<string>("");
   const liveRef = useRef<LiveDrone[]>([]);
   const eventsRef = useRef<SimEvent[]>([]);
-  const simRef = useRef<SimSettings>({ mode: "drones", tool: "fire", radius: 8 });
+  const simRef = useRef<SimSettings>({ mode: "drones", tool: "fire", radius: 8, placing: false });
 
   const [feed, setFeed] = useState<LiveSnapshot | null>(null);
   const [liveDrones, setLiveDrones] = useState<LiveDrone[]>([]);
@@ -97,6 +97,8 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
   const [error, setError] = useState<string | null>(null);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // armed by the Launch a drone button; the next click on the map puts one there, then disarms
+  const [placing, setPlacing] = useState(false);
   const [cursor, setCursor] = useState<Vec | null>(null);
   const [zoom, setZoom] = useState(1);
   const [, setPulse] = useState(0);          // nudges the side rail to re-read the sim
@@ -198,7 +200,10 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
 
   useEffect(() => { liveRef.current = liveDrones; }, [liveDrones]);
   useEffect(() => { eventsRef.current = events; }, [events]);
-  useEffect(() => { simRef.current = { mode, tool, radius }; }, [mode, tool, radius]);
+  useEffect(() => { simRef.current = { mode, tool, radius, placing }; }, [mode, tool, radius, placing]);
+
+  // arming is about the drone map; switching to the simulator means you wanted a fire, not a drone
+  useEffect(() => { if (mode !== "drones") setPlacing(false); }, [mode]);
 
   // The feed goes quiet the moment Minecraft closes; age it out so the badge tells the truth.
   useEffect(() => {
@@ -340,7 +345,9 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
     const { x, y } = localPoint(event);
     event.currentTarget.setPointerCapture(event.pointerId);
 
-    const hit = pick(x, y);
+    // While armed, a press is never a grab: the point of the next click is where the new drone
+    // goes, and grabbing whatever happened to be under it would send that one flying instead.
+    const hit = placing ? null : pick(x, y);
     if (hit) {
       setSelected(hit);
       dragRef.current = { kind: "aim", pointer: event.pointerId, drone: hit, fromX: x, fromY: y, toX: x, toY: y, moved: 0 };
@@ -392,6 +399,20 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
       .catch((cause) => setSimError(cause instanceof Error ? cause.message : String(cause)));
   }, [tool, radius, intensity]);
 
+  /**
+   * Puts a new drone where the map was clicked.
+   *
+   * Only x and z: the map is top-down, and the mod drops the drone just above the ground rather
+   * than guessing an altitude here. Nothing is drawn until the feed reports it, which is a
+   * second or so - the same wait as a simulated fire, and for the same reason.
+   */
+  const plop = useCallback((at: Vec) => {
+    setPlacing(false);
+    setOrderError(null);
+    void spawnDrone(Math.round(at.x), Math.round(at.z), DIMENSION)
+      .catch((cause) => setOrderError(cause instanceof Error ? cause.message : String(cause)));
+  }, []);
+
   const endDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointer !== event.pointerId) return;
@@ -405,13 +426,14 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
     if (drag.kind === "pan") {
       // Against the view as it was when the press landed: even a click nudges the map a
       // pixel or two, and at a zoomed-out scale a pixel or two is a long way to be wrong by.
-      if (mode === "simulate" && drag.moved <= DRAG_SLOP) {
+      if ((mode === "simulate" || placing) && drag.moved <= DRAG_SLOP) {
         const { scale } = viewRef.current;
         const meta = backdrop?.meta;
-        place({
+        const at = {
           x: (drag.fromX - drag.viewX) / scale + (meta?.origin_x ?? 0),
           z: (drag.fromY - drag.viewY) / scale + (meta?.origin_z ?? 0),
-        });
+        };
+        if (mode === "simulate") place(at); else plop(at);
       }
       return;
     }
@@ -450,6 +472,7 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         dragRef.current = null;
+        setPlacing(false);
         setSelected(null);
       }
     };
@@ -500,6 +523,7 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
           ref={canvasRef}
           data-dragging={dragRef.current?.kind ?? "none"}
           data-mode={mode}
+          data-placing={placing}
           aria-label="Top-down map of the Minecraft world with drone positions"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -513,7 +537,9 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
         <div className={styles.hint} aria-hidden="true">
           {mode === "simulate"
             ? <>Click the map to set off a {EVENT_INFO[tool].label.toLowerCase()} &middot; drag to pan &middot; scroll to zoom</>
-            : <>Drag an arrow out of a drone to send it there &middot; drag the map to pan &middot; scroll to zoom</>}
+            : placing
+              ? <>Click the map to launch a new drone there &middot; Escape to cancel &middot; drag to pan</>
+              : <>Drag an arrow out of a drone to send it there &middot; drag the map to pan &middot; scroll to zoom</>}
           {feed?.live && " · the mod is streaming changes as they happen"}
         </div>
 
@@ -575,10 +601,19 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
           <span>Drones</span>
           <span>{flying ? `${flying} in transit` : "all holding"}</span>
         </header>
+        <button
+          type="button"
+          className={styles.place}
+          data-armed={placing}
+          aria-pressed={placing}
+          onClick={() => setPlacing((armed) => !armed)}
+        >
+          {placing ? "Click the map to place it" : "Launch a drone"}
+        </button>
         {liveDrones.length === 0 && (
           <p className={styles.empty}>
             {feed?.live
-              ? "No drones in the world yet. Spawn one with /drone spawn."
+              ? "No drones in the world yet. Launch one on the map, or use /drone spawn."
               : "Waiting for the mod\u2019s world feed."}
           </p>
         )}
@@ -625,6 +660,8 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
                 ? <p className={styles.orderError}>Order failed: {orderError}</p>
                 : <p className={styles.coords}>Drag it on the map to send it somewhere.</p>}
             </>
+          ) : orderError ? (
+            <p className={styles.orderError}>{orderError}</p>
           ) : (
             <p className={styles.coords}>Pick a drone, or drag one on the map.</p>
           )}
@@ -753,6 +790,9 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
   if (overlay.sim.mode === "simulate" && overlay.cursor && !overlay.drag) {
     drawPlacement(ctx, overlay.cursor, overlay.sim, view);
   }
+  if (overlay.sim.placing && overlay.cursor && !overlay.drag) {
+    drawNewDrone(ctx, overlay.cursor, overlay.time);
+  }
 
   // drag arrow first, so markers sit on top of it
   const aim = overlay.drag?.kind === "aim" ? overlay.drag : null;
@@ -853,6 +893,31 @@ function drawPlacement(ctx: CanvasRenderingContext2D, cursor: { x: number; y: nu
 
   label(ctx, info.scatters ? `${info.label} · ${sim.radius}m` : info.label,
     cursor.x, cursor.y + ring + 6);
+}
+
+/**
+ * The drone that would appear if you clicked now.
+ *
+ * Drawn as the real marker with a placement ring over it, so what you are about to put down looks
+ * like what you will get - pulsing rather than solid, because until the feed reports it there is
+ * no drone there at all.
+ */
+function drawNewDrone(ctx: CanvasRenderingContext2D, cursor: { x: number; y: number }, time: number) {
+  ctx.save();
+  ctx.globalAlpha = 0.55 + 0.2 * Math.sin(time / 260);
+  drawDrone(ctx, cursor.x, cursor.y, { name: "", yaw: 0 }, "#e6e2d8",
+    { selected: false, hovered: true, labelled: false });
+
+  ctx.globalAlpha = 0.9;
+  ctx.strokeStyle = "#e6e2d8";
+  ctx.lineWidth = 1.2;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.arc(cursor.x, cursor.y, 14, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  label(ctx, "New drone", cursor.x, cursor.y + 22);
 }
 
 /**

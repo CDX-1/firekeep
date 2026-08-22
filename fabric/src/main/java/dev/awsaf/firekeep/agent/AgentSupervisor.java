@@ -5,6 +5,7 @@ import dev.awsaf.firekeep.entity.DroneEntity;
 import dev.awsaf.firekeep.entity.FirekeepEntities;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 
@@ -193,10 +194,11 @@ public final class AgentSupervisor {
         String username = DroneAgents.NAME_PREFIX + agent.droneId;
         Path gameDir = Path.of(fill(config.gameDir, agent, username)).toAbsolutePath();
 
-        List<String> command = new ArrayList<>(config.command.size());
+        List<String> command = new ArrayList<>(config.command.size() + 1);
         for (String part : config.command) {
             command.add(fill(part, agent, username).replace("{gameDir}", gameDir.toString()));
         }
+        addMods(command);
 
         try {
             Files.createDirectories(gameDir);
@@ -225,6 +227,40 @@ public final class AgentSupervisor {
     }
 
     /**
+     * Hands the agent's loader the renderer mods listed in the config.
+     *
+     * <p>Twelve Minecraft clients on one GPU is only affordable if each one renders cheaply, which
+     * is what Sodium and Nvidium are here for. Neither is a dependency of this mod - they are
+     * loose jars the operator drops in - so they are added at launch through loader's
+     * {@code fabric.addMods}, the one hook that takes a jar the classpath knows nothing about.
+     *
+     * <p>The property is inserted straight after the java executable so it lands among the JVM
+     * arguments; anything appended to the end of the command would be a game argument instead.
+     * A jar that is not where the config says is dropped with a warning: an agent that renders
+     * the slow way still films its drone.
+     */
+    private static void addMods(List<String> command) {
+        if (config.mods.isEmpty() || command.isEmpty()) {
+            return;
+        }
+        Path base = FabricLoader.getInstance().getGameDir();
+        List<String> jars = new ArrayList<>(config.mods.size());
+        for (String entry : config.mods) {
+            Path jar = base.resolve(entry).toAbsolutePath().normalize();
+            if (Files.isRegularFile(jar)) {
+                jars.add(jar.toString());
+            } else {
+                Firekeep.LOGGER.warn("agent mod {} is not there; agents will run without it", jar);
+            }
+        }
+        if (jars.isEmpty()) {
+            return;
+        }
+        command.add(1, "-Dfabric.addMods=" + String.join(File.pathSeparator, jars));
+        Firekeep.LOGGER.info("agents will load {} extra mod(s): {}", jars.size(), jars);
+    }
+
+    /**
      * Writes the two options a fresh game directory must have before an agent can run unattended.
      *
      * <p>{@code onboardAccessibility} is the important one: on a game directory that has never been
@@ -233,6 +269,10 @@ public final class AgentSupervisor {
      * never connecting, with nothing in the log to say why.
      *
      * <p>{@code pauseOnLostFocus} matters because an agent's window is hidden and so never focused.
+     *
+     * <p>{@code enableVsync} is off because a dozen clients each waiting on the same display's
+     * refresh would serialise the whole fleet behind one monitor, and the render distance is cut
+     * right down: an agent only ever films the few chunks around its own drone.
      *
      * <p>Only written when there is no options.txt yet; Minecraft fills in every other default and
      * rewrites the file itself on first run.
@@ -243,7 +283,8 @@ public final class AgentSupervisor {
             return;
         }
         Files.write(options,
-                List.of("onboardAccessibility:false", "pauseOnLostFocus:false"),
+                List.of("onboardAccessibility:false", "pauseOnLostFocus:false",
+                        "enableVsync:false", "renderDistance:8", "simulationDistance:5"),
                 StandardCharsets.UTF_8);
         Firekeep.LOGGER.info("seeded options.txt for a new agent game directory at {}", gameDir);
     }

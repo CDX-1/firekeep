@@ -76,7 +76,7 @@ public final class DroneManager {
     private static final ConcurrentLinkedQueue<Pending> INBOX = new ConcurrentLinkedQueue<>();
 
     private static volatile DroneConfig config;
-    private static volatile N8nClient n8n;
+    private static volatile HubClient hub;
     private static volatile MinecraftServer server;
     private static long lastPerceptionPush;
     private static int autoId;
@@ -105,24 +105,24 @@ public final class DroneManager {
             DroneConfig loaded = DroneConfig.load();
             config = loaded;
 
-            N8nClient client = new N8nClient(loaded);
+            HubClient client = new HubClient(loaded);
             client.start();
-            n8n = client;
+            hub = client;
             DroneEvents.start(loaded, client);
 
             DroneApiServer.start(loaded);
-            Firekeep.LOGGER.info("drone bridge ready: perception {}x{} blocks, n8n at {}",
+            Firekeep.LOGGER.info("drone bridge ready: perception {}x{} blocks, reporting to {}",
                     loaded.perceptionRadius, loaded.perceptionVerticalRadius,
-                    loaded.n8nWebhookUrl.isBlank() ? "<no webhook configured>" : loaded.n8nWebhookUrl);
+                    loaded.eventsEnabled ? client.endpoint() : "<events disabled>");
         });
 
         ServerLifecycleEvents.SERVER_STOPPING.register(minecraftServer -> {
             DroneApiServer.stop();
-            N8nClient client = n8n;
+            HubClient client = hub;
             if (client != null) {
                 client.stop();
             }
-            n8n = null;
+            hub = null;
             server = null;
             releaseAllChunks(minecraftServer);
             CONTROLLERS.clear();
@@ -141,8 +141,8 @@ public final class DroneManager {
         return config;
     }
 
-    public static N8nClient n8n() {
-        return n8n;
+    public static HubClient hub() {
+        return hub;
     }
 
     // ---------------------------------------------------------------- the tick
@@ -237,7 +237,7 @@ public final class DroneManager {
      * Re-reads the world's drones and makes sure each has an id and a controller.
      *
      * <p>Ids are assigned here rather than at spawn because a drone can also arrive by
-     * {@code /summon} or out of a saved chunk, and a drone n8n cannot name is a drone n8n cannot
+     * {@code /summon} or out of a saved chunk, and a drone the hub cannot name is one it cannot
      * use. The generated name is written back to the entity, so it survives a restart.
      */
     private static Map<String, DroneEntity> index(MinecraftServer minecraftServer) {
@@ -379,8 +379,8 @@ public final class DroneManager {
     }
 
     private static void pushPerception(PerceptionSnapshot snapshot, DroneConfig current) {
-        N8nClient client = n8n;
-        if (client == null || !current.pushPerception || !current.hasWebhook()) {
+        HubClient client = hub;
+        if (client == null || !current.pushPerception || !current.eventsEnabled) {
             return;
         }
         long now = System.currentTimeMillis();

@@ -1,8 +1,8 @@
 # firekeep — minecraft → real
 
-A server that waits for a Minecraft screenshot, hands it to the n8n
-`minecraft-wildfire` workflow to be turned into a photorealistic world, and
-serves the results over a small JSON API.
+The hub. Everything goes through here: n8n reaches the drones through it, Minecraft reports
+back through it, the dashboard reads from it, and it turns a screenshot into a photorealistic
+world along the way. It is the only process meant to be exposed — see [The hub](#the-hub).
 
 ## Run it
 
@@ -35,24 +35,63 @@ The direct path is still there when you want it: `--backend marble`, or
 `POST /capture?backend=marble` for one capture. That one needs the key, spends
 credits, and honours `--model`/`--prompt`.
 
-Everything else reaches Minecraft through this server, which is the only process that talks
-to both sides. The dashboard calls it and nothing else; it generates the world (via n8n or
-the Marble API), reads the save off disk, takes the mod's world feed, and pulls the drone
-cameras off the agents:
+## The hub
+
+This server is the only process anything outside this machine talks to. Minecraft, n8n and the
+dashboard all reach each other through it, and none of them holds an address or a key for any
+of the others:
 
 ```
-browser ──▶ dashboard (proxy only) ──▶ server.py ──┬─▶ n8n / Marble API
-                                                   ├─▶ the save's region files
-                                                   ├─▶ the mod's world feed  (it POSTs here)
-                                                   └─▶ the camera agents      :8087, :8088+
+                       ┌──────────────── server.py ────────────────┐
+   n8n ──(tunnel)──────▶  /api/fleet/*   ──────────────────────────▶  Minecraft  127.0.0.1:8090
+                       │  /api/mod/events ◀───────────────────────── (it POSTs here)
+   n8n ◀───────────────┤  forwards those on, with its own key
+                       │  /api/live, /api/world/stream, /api/cameras
+   dashboard ─────────▶│  /api/events, /api/drones/*, /capture
+                       │
+                       └──▶ n8n webhooks · the Marble API · the save on disk · the agents
 ```
 
-Where the agents are, if they are not next door:
+Which means, concretely:
+
+- **n8n never sees Minecraft.** It calls `/api/fleet/...` here, and this server calls the mod's
+  control API on loopback with the mod's bearer token. Everything the mod exposes is available
+  under that prefix, verb, query and body unchanged — `/api/fleet/drones`,
+  `/api/fleet/drones/<id>/perception?fresh=true`, `/api/fleet/dispatch`, and so on. The mod's
+  status codes come back as themselves, so a 404 for an unknown drone is still a 404.
+- **Minecraft never sees n8n.** The mod POSTs what it noticed to `/api/mod/events`; this server
+  keeps it and forwards it to the workflow. `GET /api/mod/events?limit=&event=&drone_id=&since=`
+  replays them for a workflow that missed a webhook.
+- **Only this port is exposed.** Point the Cloudflare tunnel here, not at 8090. The mod's API
+  stays bound to loopback, where the only thing that can reach it is this process.
+
+### Keys
 
 | | |
 |---|---|
+| `FIREKEEP_API_KEY` | what this server demands of anything not on this machine. Also `--api-key`. Unset means open — fine on a laptop, not behind a tunnel |
+| `DRONE_API_KEY` | the mod's key, from `fabric/run/config/firekeep-drones.json`; this server presents it when calling the mod |
+| `FIREKEEP_MINECRAFT` | where the mod is (default `http://127.0.0.1:8090`). Also `--minecraft` |
+| `FIREKEEP_N8N_BASE` | the n8n webhook base (default `https://smallwoken.app.n8n.cloud/webhook`) |
+| `FIREKEEP_N8N_EVENTS` | webhook for forwarded mod events — a full URL, a bare path, or `off` (default `firekeep-events`) |
+| `FIREKEEP_N8N_KEY` | sent to n8n as `X-Firekeep-Key`, if set |
+| `FIREKEEP_N8N_WILDFIRE` | the world-generation webhook (default `minecraft-wildfire`) |
 | `FIREKEEP_AGENTS` | the Fabric server's agent directory (default `http://127.0.0.1:8087`) |
 | `FIREKEEP_CAMERAS` | the one agent to use when there is no directory (default `http://127.0.0.1:8088`) |
+
+`FIREKEEP_API_KEY` is only asked for when the caller is not local. A request is local when the
+socket is loopback *and* nothing forwarded it: `cloudflared` runs on this machine too, so the
+tunnel's traffic also arrives from 127.0.0.1 — what gives it away is the `CF-Connecting-IP` it
+sets. `GET /api/health` is always open, so a probe can tell "down" from "rejected".
+
+`/api/health` reports both links, which is usually enough to say which side is broken:
+
+```json
+{ "ok": true,
+  "minecraft": { "url": "http://127.0.0.1:8090", "keyed": true, "online": true },
+  "n8n": { "events_url": "...", "online": true, "sent": 41, "dropped": 0, "queued": 0 },
+  "secured": true }
+```
 
 Wiring up the mod? Run with `--dry-run` and hammer it as hard as you like.
 
@@ -67,6 +106,8 @@ Wiring up the mod? Run with `--dry-run` and hammer it as hard as you like.
 | `--watch` | auto-submit new screenshots from every Minecraft install found |
 | `--watch-dir DIR` | watch an extra folder (repeatable) |
 | `--workers 1` | concurrent generations |
+| `--api-key KEY` | require this bearer token from anything off this machine (default `$FIREKEEP_API_KEY`) |
+| `--minecraft URL` | the mod's control API (default `$FIREKEEP_MINECRAFT`, else `http://127.0.0.1:8090`) |
 | `--dry-run` | no API calls, no credits |
 | `--prompt "..."` | style guidance |
 | `--save DIR` | Minecraft save to map (default: newest under `fabric/run/saves`) |
@@ -149,11 +190,73 @@ One job, plus the full Marble `world` payload (mesh, splat and pano URLs).
 
 ### `GET /api/health`
 
-`{ ok, credits, queued, busy, model, backend, backends, dry_run, live, watchers, cameras }`
+`{ ok, credits, queued, busy, model, backend, backends, dry_run, live, watchers, cameras,
+minecraft, n8n, secured }`
 
 `credits` is `null` on a wildfire server — the balance being spent is not ours.
 On a marble server it is the Marble balance, cached for a minute so a polling
 dashboard does not turn into a stream of API calls.
+
+`minecraft` and `n8n` describe the two links this server sits between, and this is the one
+route that answers without a key, so a probe through the tunnel can always find out which side
+is down.
+
+### `ANY /api/fleet/<the mod's path>`
+
+The mod's control API, re-served. Method, query string and body go through untouched, the
+mod's reply and its status code come back untouched, and this server supplies the one thing a
+workflow should not have to hold: where Minecraft is and what token it wants.
+
+```sh
+curl -H "Authorization: Bearer $FIREKEEP_API_KEY" localhost:8000/api/fleet/drones
+curl -H "Authorization: Bearer $FIREKEEP_API_KEY"      "localhost:8000/api/fleet/drones/drone_01/perception?fresh=true"
+curl -X POST -H "Authorization: Bearer $FIREKEEP_API_KEY" -H 'Content-Type: application/json'      -d '{"command":"move_to","x":20,"y":85,"z":-10}'      "localhost:8000/api/fleet/drones/drone_01/command?wait=true"
+curl -X POST -H "Authorization: Bearer $FIREKEEP_API_KEY" -H 'Content-Type: application/json'      -d '{"x":20,"y":85,"z":-10}' localhost:8000/api/fleet/dispatch
+```
+
+`?wait=true` asks the mod to hold its reply until the drone has actually finished, so the
+timeout on that call is a flight's worth of patience (two minutes) rather than a request's.
+See `fabric/README.md` for every command and what each one does.
+
+If Minecraft is not running, these answer `503` with `"Minecraft is not reachable at ..."` —
+never a 200 with an empty roster, because a workflow cannot tell those apart.
+
+### `POST /api/mod/events`
+
+What Minecraft noticed: `fire_detected`, `disaster_detected`, a command's outcome. The mod
+posts here rather than at a webhook, so it holds no URL and no secret for anything outside this
+machine. Each event is kept and forwarded to `FIREKEEP_N8N_EVENTS`.
+
+```json
+{ "event": "fire_detected", "drone_id": "alpha", "at": 1750000000000,
+  "payload": { "hazard": "fire", "size": 14, "location": { "x": 120, "y": 70, "z": -44 } } }
+```
+
+`GET /api/mod/events?limit=50&event=fire_detected&drone_id=alpha&since=<ms>` replays them,
+newest first — which is how a workflow catches up on what it missed while it was down. `event`
+takes a comma-separated list.
+
+Forwarding is fire-and-forget: a workflow that is down, slow or not deployed yet cannot stall
+the mod, and a full queue sheds its oldest event rather than the newest report of a fire.
+
+### `POST /api/drone-events`
+
+Accepts a workflow's conclusion about an incident seen by a drone. It appears in that drone's
+camera-feed event overlay; it does not move the drone or change the Minecraft world. Reusing
+`event_id` makes a workflow retry update the same event instead of creating a duplicate.
+
+```json
+{
+  "event_id": "fire-overworld-120-70--44",
+  "drone_id": "alpha",
+  "type": "fire_detected",
+  "severity": "high",
+  "message": "Fire detected near the treeline.",
+  "location": { "x": 120, "y": 70, "z": -44, "dimension": "minecraft:overworld" }
+}
+```
+
+`GET /api/drone-events?drone_id=alpha` returns that overlay's recent event history.
 
 ### `GET /jobs/<id>/<file>`
 
@@ -213,9 +316,23 @@ round trip:
 `{ "id": "drone-1", "forward": 1, "right": 0, "up": 0, "yaw": 0 }` - Minecraft-style stick
 in the camera frame. The drone keeps that velocity until a hover or goto. Zeros hover.
 
+### `POST /api/drones/look`
+
+`{ "id": "drone-1", "pitch": 25 }` - tilts the camera 25 degrees down without changing the
+drone's active flight. Pitch ranges from `0` (level) to `90` (straight down).
+
 ### `POST /api/drones/hover`
 
 `{ "id": "drone-1" }` - brakes and holds.
+
+### `POST /api/drones/spawn`
+
+`{ "x": 40, "z": 12 }` - puts a new drone into the world there, on the same queue as a flight
+order. `y` is optional and normally left out: the world map is top-down, so the mod drops the
+drone just above the ground rather than the dashboard guessing an altitude. `id` is optional too;
+without one the mod names it. The mod launches a rendering agent for the new drone as soon as it
+exists, so it turns up on the camera wall as well as the map - up to `maxAgents` in
+`fabric/run/config/firekeep-agents.json`.
 
 ### `GET /api/live`
 
@@ -437,7 +554,9 @@ Writes into the same `out/jobs/<id>/` layout.
 |---|---|
 | `marble.py` | World Labs API client |
 | `wildfire.py` | client for the n8n `minecraft-wildfire` workflow |
-| `server.py` | capture server: queue, workers, JSON API, folder watcher |
+| `minecraft.py` | the only way out of this process and into the game: the mod's loopback API |
+| `n8n.py` | everything sent *to* n8n, and the one place its URLs and keys live |
+| `server.py` | the hub: queue, workers, JSON API, the fleet proxy, folder watcher |
 | `main.py` | one-shot CLI |
 | `worldmap.py` | renders a save's region files into a top-down PNG (also a CLI) |
 | `live.py` | the live world layer: the mod's feed, and the stream out to dashboards |

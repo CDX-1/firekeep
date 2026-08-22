@@ -3,10 +3,14 @@
 A Minecraft **26.2** Fabric mod for autonomous disaster-response drones. Drones fly themselves;
 an AI agent, reached through n8n, only ever tells them *what* to do.
 
+n8n is not on the other end of this mod's socket. Everything in both directions goes through the
+python hub (`../python/server.py`), which is the only exposed process: it holds the mod's API
+key, it holds n8n's URLs and secrets, and neither side holds the other's.
+
 ```
-Minecraft world ─► DronePerception ─► HTTP / webhook ─► n8n ─► AI agent
-                                                                  │
-Drone executes ◄─ DroneController ◄─ DroneCommandExecutor ◄─ n8n ◄┘
+Minecraft world ─► DronePerception ─► POST /api/mod/events ─► hub ─► n8n ─► AI agent
+                                                                              │
+Drone executes ◄─ DroneController ◄─ DroneCommandExecutor ◄─ hub ◄─ /api/fleet/* ◄┘
 ```
 
 Perception is built entirely from Minecraft's own block, entity and world APIs. **No screenshots
@@ -39,7 +43,7 @@ Each drone can:
 2. Inspect the blocks and entities around it, on a configurable 3-D radius.
 3. Recognise fire, lava, water, trees, buildings, terrain, obstacles, open space, mobs and players.
 4. Reduce all of that to a few kilobytes of structured JSON plus a coarse ASCII map.
-5. Push that perception, and every notable event, to an n8n webhook.
+5. Push that perception, and every notable event, to the hub, which forwards it to n8n.
 6. Accept high-level commands over HTTP.
 7. Execute them itself — pathfinding, collision avoidance and flight are all server-side.
 8. Report the result back, synchronously on the request or asynchronously as an event.
@@ -65,8 +69,8 @@ All the new code lives in `src/main/java/dev/awsaf/firekeep/drone/`.
 | `Compass` | `north` ⇄ `-Z`. The only place Minecraft's axis convention is allowed to matter. |
 | `DronePathfinder` | Bounded 3-D A* over block states, with line-of-sight smoothing. |
 | `DroneActions` | The only code that mutates the world (currently: extinguishing fire). |
-| `DroneApiServer` | The HTTP API. |
-| `N8nClient` | Asynchronous webhook delivery. |
+| `DroneApiServer` | The HTTP API, on loopback; the hub is its only caller. |
+| `HubClient` | Asynchronous event delivery to the hub. |
 | `DroneEvents` / `DroneEvent` | Event bus, de-duplication, and the pollable event log. |
 | `DroneConfig` | Everything configurable, from `config/firekeep-drones.json`. |
 
@@ -87,8 +91,8 @@ The rule is: **the server thread writes, everyone else reads.**
   wait blocks on a `CompletableFuture` on an HTTP pool thread, never on the game loop.
 - Block scanning happens on the server thread (it must), but clustering, naming and drawing the
   map happen on a worker.
-- Webhook delivery is a daemon thread with a bounded queue that drops its oldest entry when full.
-  **An unreachable n8n can never cost a tick.**
+- Event delivery to the hub is a daemon thread with a bounded queue that drops its oldest entry
+  when full. **An unreachable hub can never cost a tick.**
 
 ### Chunk loading
 
@@ -105,10 +109,8 @@ existing.
 ```json
 {
   "api":        { "enabled": true, "host": "127.0.0.1", "port": 8090, "apiKey": "<generated>" },
-  "n8n":        { "baseUrl": "http://127.0.0.1:5678",
-                  "webhookUrl": "",
-                  "authHeader": "X-Firekeep-Key",
-                  "authValue": "",
+  "hub":        { "url": "",
+                  "apiKey": "",
                   "events": true,
                   "pushPerception": false,
                   "perceptionPushIntervalSeconds": 5 },
@@ -118,18 +120,22 @@ existing.
                   "maxReplans": 3, "pathNodeBudget": 4000, "pathSearchRadius": 48,
                   "hazardClearance": 2, "cruiseAltitude": 4 },
   "actions":    { "waterRadius": 3, "placeWaterSource": false,
-                  "fireEventCooldownSeconds": 60, "disasterFireCells": 12 }
+                  "fireEventCooldownSeconds": 300, "disasterFireCells": 12 }
 }
 ```
 
-Environment variables override the file, so one build can be pointed at a different n8n without
+`hub.url` is normally left blank, and that is not a missing setting: blank means "the same server
+the screenshots already go to", so there is one address to change rather than two. `hub.apiKey` is
+only needed if the hub was started with a `FIREKEEP_API_KEY`, and even then only when the mod and
+the hub are not on the same machine — the hub lets local callers through unkeyed.
+
+Environment variables override the file, so one build can be pointed at a different hub without
 editing anything:
 
 | Variable | Overrides |
 |---|---|
-| `N8N_BASE_URL` | `n8n.baseUrl` |
-| `N8N_WEBHOOK_URL` | `n8n.webhookUrl` |
-| `N8N_WEBHOOK_KEY` | `n8n.authValue` |
+| `FIREKEEP_SERVER` | `hub.url` |
+| `FIREKEEP_API_KEY` | `hub.apiKey` |
 | `DRONE_API_KEY` | `api.apiKey` |
 | `DRONE_API_PORT` | `api.port` |
 | `PERCEPTION_RADIUS` | `perception.radius` |
@@ -142,8 +148,8 @@ Notable knobs:
 - **`flight.hazardClearance`** — set to `0` to let routes pass right beside fire; `2` keeps a buffer.
 - **`actions.placeWaterSource`** — off by default. On, `dispense_water` also leaves a real water
   block, which will then flow and reshape terrain.
-- **`n8n.pushPerception`** — off by default. On, one drone's perception is pushed to the webhook
-  every `perceptionPushIntervalSeconds` in addition to events.
+- **`actions.fireEventCooldownSeconds`** — the shared, per-incident cooldown. Drones all use the
+  same incident ID, so multiple agents observing one fire still produce only one event.
 
 ---
 
@@ -153,16 +159,17 @@ The API starts and stops with the Minecraft server; there is nothing separate to
 
 ```
 [Server thread/INFO] (firekeep) drone API listening on http://127.0.0.1:8090/api (bearer token required)
-[Server thread/INFO] (firekeep) drone bridge ready: perception 10x5 blocks, n8n at http://127.0.0.1:5678/webhook/firekeep
+[Server thread/INFO] (firekeep) drone bridge ready: perception 10x5 blocks, reporting to http://127.0.0.1:8000/api/mod/events
 ```
 
 Two things to check on a dedicated server:
 
 - **Turn off idle pausing.** Modern dedicated servers stop ticking about a minute after the last
   player leaves, which freezes every drone. Set `pause-when-empty-seconds=0` in `server.properties`.
-- **Bind address.** The API listens on `127.0.0.1` by default. If n8n runs on another host, set
-  `api.host` to `0.0.0.0` **and** put it behind a firewall or reverse proxy — the API key is the
-  only gate.
+- **Leave the bind address alone.** The API listens on `127.0.0.1`, and the hub is the only thing
+  that calls it. Do not expose this port and do not tunnel it: expose the hub instead, which
+  re-serves everything below under `/api/fleet/*` behind its own key. `api.host` only needs
+  changing if the hub runs on a different machine from Minecraft, and then it wants a firewall.
 
 ### Authentication
 
@@ -257,7 +264,7 @@ its caller is told so, which is what makes it safe for an AI to change its mind 
 | `return_home` | — | Flies to its stored home. |
 | `follow` | `target`, optional `radius` | Another drone's id, or a player name. Never completes. |
 | `dispense_water` | optional `radius` | Extinguishes fire around the ground below the drone. |
-| `look` | `yaw` + `pitch`, or `at: {x,y,z}` | With no fields, the camera goes back to following motion. |
+| `look` | optional `yaw` and/or `pitch`, or `at: {x,y,z}` | Camera-only: does not interrupt an active move, patrol or follow. Positive pitch looks down; `{"command":"look","pitch":25}` gives a 25° downward angle. With no fields, the camera goes back to following motion. |
 | `patrol` | `waypoints: [{x,y,z}, …]`, optional `loop` | |
 | `set_speed` | `speed` (blocks/second) | |
 | `set_home` | optional `x`, `y`, `z` | Defaults to where it is now. Persists on the entity. |
@@ -268,6 +275,9 @@ Every command also accepts `"await": true` and `"timeout_ms"`.
 Aliases are accepted so a model's phrasing rarely matters: `goto`/`fly_to`/`navigate` → `move_to`,
 `stop`/`hold` → `hover`, `rtb`/`go_home` → `return_home`, `extinguish`/`drop_water` → `dispense_water`,
 `observe`/`perceive` → `scan`, `aim`/`face` → `look`. Directions accept `n`, `ne`, `sw`, …
+
+The dashboard exposes the same camera control as a **Camera down** slider in an expanded drone
+viewer. It forwards the requested pitch through the Python relay without interrupting flight.
 
 ### What the mod handles, not n8n
 
@@ -379,13 +389,14 @@ TTTTttttt..ttt.ttTtt.
 
 ## Events
 
-Pushed to `n8n.webhookUrl` as `POST` with `Content-Type: application/json` and, if `authValue` is
-set, the `authHeader` header. Also kept in a 256-entry ring buffer readable at `GET /api/events`,
-so a flow can be developed before there is a URL for it.
+`POST`ed to the hub at `<hub.url>/api/mod/events` with `Content-Type: application/json`, and, if
+`hub.apiKey` is set, an `Authorization: Bearer` header. The hub keeps them and forwards them to
+whatever workflow it is configured for; this mod does not know which one that is. Also kept in a
+256-entry mod-local ring buffer at `GET /api/events`, so the log survives the hub being down.
 
 | `event` | When | Extra fields |
 |---|---|---|
-| `fire_detected` | A drone sees fire or lava it has not reported recently | `hazard`, `size`, `severity`, `direction`, `distance`, `terrain`, `biome`, `location`, `drone_position` |
+| `fire_detected` | A drone sees fire or lava not reported by any agent during the cooldown | `incident_id`, `hazard`, `size`, `severity`, `direction`, `distance`, `terrain`, `biome`, `location` |
 | `disaster_detected` | Same, but the cluster is at least `disasterFireCells` blocks | as above |
 | `drone_arrived` | A movement command completed | `command`, `command_id`, `location` |
 | `drone_stuck` | Replanning stopped helping | `reason`, `replans`, `goal`, `location` |
@@ -402,8 +413,8 @@ Every event carries `event`, `drone_id` and `at` (epoch milliseconds).
   "direction": "east", "distance": 6.34,
   "terrain": "settlement", "biome": "minecraft:snowy_taiga",
   "dimension": "minecraft:overworld",
-  "location": { "x": 4, "y": 71, "z": 0 },
-  "drone_position": { "x": 0.5, "y": 76.42, "z": 0.5 } }
+  "incident_id": "fire:minecraft:overworld:0:8:0",
+  "location": { "x": 4, "y": 71, "z": 0 } }
 ```
 
 **De-duplication matters here.** A forest fire changes state every tick. Sightings are folded onto
@@ -414,44 +425,34 @@ per fire rather than twenty a second.
 
 ## Connecting it to n8n
 
-### 1. Outbound — Minecraft tells n8n something happened
+Through the hub, in both directions. Nothing in this section names port 8090, and n8n never
+should: every URL below is the hub's, and the hub calls this mod on loopback.
 
-Add a **Webhook** node:
+### Outbound — Minecraft tells n8n something happened
 
-| Setting | Value |
-|---|---|
-| HTTP Method | `POST` |
-| Path | `firekeep` |
-| Authentication | *Header Auth* — name `X-Firekeep-Key`, value your shared secret |
-| Respond | *Immediately* |
+Nothing to configure here beyond `hub.url`, which is normally blank. The mod posts every event
+to `<hub>/api/mod/events`; the hub forwards it to the workflow named by its own
+`FIREKEEP_N8N_EVENTS`. Your n8n **Webhook** node keeps whatever path and header auth it already
+had — it is the hub, not Minecraft, that now calls it.
 
-Copy its **production URL** into the mod config:
+A workflow can also just ask, which is what a flow that was down for a minute wants:
+`GET <hub>/api/mod/events?limit=50&event=fire_detected&since=<ms>`.
 
-```json
-"n8n": {
-  "webhookUrl": "http://127.0.0.1:5678/webhook/firekeep",
-  "authHeader": "X-Firekeep-Key",
-  "authValue": "shared-secret-123"
-}
-```
-
-Route on `{{ $json.event }}` with a **Switch** node: `fire_detected` and `disaster_detected` into
-the dispatch branch, `drone_stuck` and `command_failed` into recovery, the rest into logging.
-
-If you would rather poll than receive, skip the webhook and have a **Schedule Trigger** hit
-`GET /api/events?limit=50`.
-
-### 2. Inbound — n8n tells a drone what to do
+### Inbound — n8n tells a drone what to do
 
 Create one **Header Auth** credential and reuse it on every HTTP Request node:
-name `Authorization`, value `Bearer <DRONE_API_KEY>`.
+name `Authorization`, value `Bearer <FIREKEEP_API_KEY>` — the hub's key, not this mod's. The
+mod's key never leaves the machine Minecraft runs on.
+
+Every route below is the mod's own, re-served under `/api/fleet`, with the method, query and
+body unchanged and the mod's own status codes coming back untouched.
 
 **Read the fleet**
 
 | Setting | Value |
 |---|---|
 | Method | `GET` |
-| URL | `http://127.0.0.1:8090/api/drones` |
+| URL | `http://127.0.0.1:8000/api/fleet/drones` |
 | Authentication | Generic → Header Auth → the credential above |
 
 **Read one drone's surroundings** — this is the node whose output you feed the model:
@@ -459,7 +460,7 @@ name `Authorization`, value `Bearer <DRONE_API_KEY>`.
 | Setting | Value |
 |---|---|
 | Method | `GET` |
-| URL | `=http://127.0.0.1:8090/api/drones/{{ $json.drone_id }}/perception?fresh=true` |
+| URL | `=http://127.0.0.1:8000/api/fleet/drones/{{ $json.drone_id }}/perception?fresh=true` |
 | Authentication | Header Auth |
 
 **Dispatch the nearest free drone to a fire** — let the mod choose which drone goes:
@@ -467,7 +468,7 @@ name `Authorization`, value `Bearer <DRONE_API_KEY>`.
 | Setting | Value |
 |---|---|
 | Method | `POST` |
-| URL | `http://127.0.0.1:8090/api/dispatch` |
+| URL | `http://127.0.0.1:8000/api/fleet/dispatch` |
 | Send Body | on, JSON |
 | Body | `={{ JSON.stringify({ x: $json.location.x, y: $json.location.y + 6, z: $json.location.z }) }}` |
 
@@ -476,7 +477,7 @@ name `Authorization`, value `Bearer <DRONE_API_KEY>`.
 | Setting | Value |
 |---|---|
 | Method | `POST` |
-| URL | `=http://127.0.0.1:8090/api/drones/{{ $json.drone_id }}/command?wait=true` |
+| URL | `=http://127.0.0.1:8000/api/fleet/drones/{{ $json.drone_id }}/command?wait=true` |
 | Send Body | on, JSON |
 | Body | `={{ JSON.stringify($json.command) }}` |
 | Timeout | `35000` (a little above the mod's 30 s default wait) |
@@ -484,15 +485,18 @@ name `Authorization`, value `Bearer <DRONE_API_KEY>`.
 Use `?wait=true` when the next step needs the outcome; omit it when fanning out to several drones
 and let the events tell you how each one ended.
 
+If Minecraft is not running, these come back `503` from the hub rather than as a connection
+error, and `GET <hub>/api/health` says which side is down under `minecraft` and `n8n`.
+
 ### 3. Shape of the agent loop
 
 ```
-Webhook (fire_detected)
-  └─► HTTP GET /api/drones                     what have we got
-  └─► HTTP POST /api/dispatch                  who is closest and free
-  └─► HTTP GET  /api/drones/{id}/perception    what does it see now
-  └─► AI Agent                                 decide the next high-level move
-  └─► HTTP POST /api/drones/{id}/command       do it
+Webhook (fire_detected, forwarded by the hub)
+  └─► HTTP GET  /api/fleet/drones                     what have we got
+  └─► HTTP POST /api/fleet/dispatch                   who is closest and free
+  └─► HTTP GET  /api/fleet/drones/{id}/perception     what does it see now
+  └─► AI Agent                                        decide the next high-level move
+  └─► HTTP POST /api/fleet/drones/{id}/command        do it
   └─► (loop back on drone_arrived)
 ```
 
@@ -508,6 +512,9 @@ Ready-made bodies are in [`examples/n8n/`](examples/n8n/):
 ---
 
 ## Testing a drone by hand
+
+These call the mod directly, which is the right thing when you are working out whether the mod
+or the hub is broken. For the path n8n actually takes, run `examples/n8n/curl-examples.sh`.
 
 ```bash
 KEY=$(python3 -c "import json;print(json.load(open('run/config/firekeep-drones.json'))['api']['apiKey'])")

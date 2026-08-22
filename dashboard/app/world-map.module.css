@@ -74,3 +74,13 @@
 /* In simulation mode the map is an aiming surface, so it says so before you press. */
 .canvas[data-mode="simulate"] { cursor: crosshair; }
 .canvas[data-mode="simulate"][data-dragging="pan"] { cursor: grabbing; }
+
+/* Armed to place a drone: the same aiming surface, for the same reason. */
+.canvas[data-placing="true"] { cursor: crosshair; }
+.canvas[data-placing="true"][data-dragging="pan"] { cursor: grabbing; }
+
+/* Sits under the rail header rather than in the footer, because it is about the fleet
+   as a whole and the footer is always about the one drone you have picked. */
+.place { margin: 0 13px 10px; padding: 6px 10px; color: var(--muted); background: rgba(255, 255, 255, .05); border: 0; border-radius: 4px; font: inherit; font-size: 11px; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
+.place:hover { color: var(--text); background: rgba(255, 255, 255, .1); }
+.place[data-armed="true"] { color: #141414; background: var(--warm, #d0a06a); }

@@ -20,10 +20,24 @@ import java.util.List;
  * packaged instance have completely different classpaths and arguments - so it takes a command
  * template and fills in the per-agent parts. Placeholders: {@code {droneId}}, {@code {username}},
  * {@code {port}}, {@code {gameDir}}.
+ *
+ * <p>{@code mods} is separate from {@code command} because the two are maintained differently: the
+ * command is copied once from a working launch and left alone, while the renderer mods an agent
+ * runs are something you change. The supervisor turns the list into loader's {@code fabric.addMods}
+ * property rather than making you edit a classpath by hand.
  */
 public final class AgentLaunchConfig {
     private static final String FILE_NAME = "firekeep-agents.json";
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+    /**
+     * How many agents may run at once when the config does not say.
+     *
+     * <p>Each agent is a whole Minecraft client, so this is really a statement about the machine.
+     * Twelve is what the fleet is sized for now that drones can be placed from the dashboard;
+     * a smaller box should say so in the config rather than rely on this.
+     */
+    private static final int DEFAULT_MAX_AGENTS = 12;
 
     /** Off until somebody fills in a command; an empty template can only fail. */
     public final boolean enabled;
@@ -36,9 +50,18 @@ public final class AgentLaunchConfig {
     /** Seconds to wait before restarting an agent that exited on its own. */
     public final int restartDelaySeconds;
     public final List<String> command;
+    /**
+     * Extra mod jars every agent loads, on top of what the command's classpath already has.
+     *
+     * <p>Paths are absolute, or relative to the server's own game directory. A jar that is not
+     * there is skipped with a warning rather than failing the launch, since an agent that renders
+     * slowly is worth more than one that does not start.
+     */
+    public final List<String> mods;
 
     private AgentLaunchConfig(boolean enabled, boolean auto, int maxAgents, int portBase,
-                              String gameDir, int restartDelaySeconds, List<String> command) {
+                              String gameDir, int restartDelaySeconds, List<String> command,
+                              List<String> mods) {
         this.enabled = enabled;
         this.auto = auto;
         this.maxAgents = maxAgents;
@@ -46,6 +69,7 @@ public final class AgentLaunchConfig {
         this.gameDir = gameDir;
         this.restartDelaySeconds = restartDelaySeconds;
         this.command = List.copyOf(command);
+        this.mods = List.copyOf(mods);
     }
 
     public boolean isUsable() {
@@ -66,19 +90,15 @@ public final class AgentLaunchConfig {
                 return disabled();
             }
 
-            List<String> command = new ArrayList<>();
-            if (json.has("command") && json.get("command").isJsonArray()) {
-                json.getAsJsonArray("command").forEach(element -> command.add(element.getAsString()));
-            }
-
             return new AgentLaunchConfig(
                     bool(json, "enabled", false),
                     bool(json, "auto", true),
-                    integer(json, "maxAgents", 4),
+                    integer(json, "maxAgents", DEFAULT_MAX_AGENTS),
                     integer(json, "portBase", 8088),
                     string(json, "gameDir", "run-agent-{droneId}"),
                     integer(json, "restartDelaySeconds", 10),
-                    command);
+                    strings(json, "command"),
+                    strings(json, "mods"));
         } catch (Exception e) {
             Firekeep.LOGGER.error("could not read {}: {}", FILE_NAME, e.toString());
             return disabled();
@@ -86,7 +106,8 @@ public final class AgentLaunchConfig {
     }
 
     private static AgentLaunchConfig disabled() {
-        return new AgentLaunchConfig(false, false, 0, 8088, "run-agent-{droneId}", 10, List.of());
+        return new AgentLaunchConfig(false, false, 0, 8088, "run-agent-{droneId}", 10,
+                List.of(), List.of());
     }
 
     private static void writeTemplate(Path path) {
@@ -97,11 +118,12 @@ public final class AgentLaunchConfig {
                 + "Minecraft Client console and append the agent flags.");
         json.addProperty("enabled", false);
         json.addProperty("auto", true);
-        json.addProperty("maxAgents", 4);
+        json.addProperty("maxAgents", DEFAULT_MAX_AGENTS);
         json.addProperty("portBase", 8088);
         json.addProperty("gameDir", "run-agent-{droneId}");
         json.addProperty("restartDelaySeconds", 10);
         json.add("command", GSON.toJsonTree(List.of()));
+        json.add("mods", GSON.toJsonTree(List.of()));
 
         try {
             Files.createDirectories(path.getParent());
@@ -118,6 +140,14 @@ public final class AgentLaunchConfig {
 
     private static int integer(JsonObject json, String key, int fallback) {
         return json.has(key) ? json.get(key).getAsInt() : fallback;
+    }
+
+    private static List<String> strings(JsonObject json, String key) {
+        List<String> values = new ArrayList<>();
+        if (json.has(key) && json.get(key).isJsonArray()) {
+            json.getAsJsonArray(key).forEach(element -> values.add(element.getAsString()));
+        }
+        return values;
     }
 
     private static String string(JsonObject json, String key, String fallback) {

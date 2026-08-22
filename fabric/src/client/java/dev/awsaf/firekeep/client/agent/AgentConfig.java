@@ -32,19 +32,25 @@ public final class AgentConfig {
     public static final int FPS_CAP = intValue("fps-cap", 0, 0, 260);
 
     /**
-     * Skips the agent's own view of the level.
+     * Skips the agent's own view of the level - the single biggest saving in agent mode.
      *
-     * <p>Off, because it does not currently work: a drone capture calls {@code renderLevel} itself,
-     * but only produces terrain if the vanilla level render already ran this frame. Skipping the
-     * agent's own render leaves the capture drawing an empty world - sky and nothing else. Whatever
-     * the capture depends on (chunk section compilation and upload being the likeliest, the
-     * lightmap another) rides on the vanilla pass, so for now the agent renders its own view too.
+     * <p>Without it an agent renders the level twice a frame: once for a window nobody is looking
+     * at, and once more for the drone capture. Nobody reads the first one, so it is pure waste.
      *
-     * <p>Turning it on is still the single biggest saving available, and the proper fix is not this
-     * flag at all: an agent should point the <em>vanilla</em> render at the drone and its offscreen
-     * target, so the one render a frame already is the drone's.
+     * <p>This was off for a long time because it did not work. A capture calls {@code renderLevel}
+     * itself, but used to produce terrain only if the vanilla level render had already run that
+     * frame - skip the vanilla pass and the capture drew sky and nothing else. The suspected reason
+     * was chunk section compilation and upload riding on that pass, which is exactly the part
+     * Sodium replaces with its own terrain setup and async chunk builder, so it is on again now
+     * that agents load Sodium.
+     *
+     * <p>If a feed ever comes back as empty sky, this is the first thing to suspect: launch the
+     * agent with {@code -Dfirekeep.agent.skip-own-render=false} to get the double render back and
+     * confirm it. The real fix, if it turns out to still be needed, is not this flag at all - an
+     * agent should point the <em>vanilla</em> render at the drone and its offscreen target, so the
+     * one render a frame already is the drone's.
      */
-    public static final boolean SKIP_OWN_RENDER = boolValue("skip-own-render", false);
+    public static final boolean SKIP_OWN_RENDER = boolValue("skip-own-render", true);
 
     /** Master volume goes to zero: an agent has no listener, and the mixing is pure overhead. */
     public static final boolean MUTE = boolValue("mute", true);

@@ -1,6 +1,7 @@
 # firekeep dashboard
 
-Next.js front end for the Python capture server in `../python`.
+Next.js front end for the Python hub in `../python` — the one server this app talks to,
+and the same one n8n and the Minecraft mod go through.
 
 ## Run
 
