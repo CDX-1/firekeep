@@ -50,6 +50,16 @@ public class DroneEntity extends Entity {
     private Vec3 targetPosition;
     private Vec3 commandedVelocity = Vec3.ZERO;
     private boolean clearTargetOnArrival = true;
+    /**
+     * WASD-style stick from the dashboard. While set, {@link #desiredVelocity()} is rebuilt
+     * each tick from the current look, so turning mid-flight keeps "forward" as forward.
+     */
+    private boolean inputFlight;
+    private double inputForward;
+    private double inputRight;
+    private double inputUp;
+    /** -1 look left, +1 look right; applied at {@link #maxYawRate} degrees per tick. */
+    private double inputYaw;
 
     private double maxSpeed = DEFAULT_MAX_SPEED;
     private double acceleration = DEFAULT_ACCELERATION;
@@ -70,6 +80,9 @@ public class DroneEntity extends Entity {
     /** Flies to {@code position} and, once there, holds it (see {@link #setClearTargetOnArrival}). */
     public void setTargetPosition(Vec3 position) {
         this.targetPosition = position;
+        this.clearFlightInput();
+        this.commandedVelocity = Vec3.ZERO;
+        this.yawFollowsMotion = true;
     }
 
     public Vec3 getTargetPosition() {
@@ -94,10 +107,43 @@ public class DroneEntity extends Entity {
     public void hover() {
         this.targetPosition = null;
         this.commandedVelocity = Vec3.ZERO;
+        this.clearFlightInput();
+    }
+
+    /**
+     * Free-flight stick: {@code forward}/{@code right}/{@code up} in -1..1 along the camera,
+     * {@code yaw} -1..1 to turn. Replaces any goto. Zero stick is a hover.
+     */
+    public void setFlightInput(double forward, double right, double up, double yaw) {
+        if (forward == 0.0D && right == 0.0D && up == 0.0D && yaw == 0.0D) {
+            this.hover();
+            return;
+        }
+        this.targetPosition = null;
+        this.commandedVelocity = Vec3.ZERO;
+        this.yawFollowsMotion = false;
+        if (!this.inputFlight) {
+            this.targetYaw = this.getYRot();
+            this.targetPitch = this.getXRot();
+        }
+        this.inputFlight = true;
+        this.inputForward = forward;
+        this.inputRight = right;
+        this.inputUp = up;
+        this.inputYaw = yaw;
+    }
+
+    private void clearFlightInput() {
+        this.inputFlight = false;
+        this.inputForward = 0.0D;
+        this.inputRight = 0.0D;
+        this.inputUp = 0.0D;
+        this.inputYaw = 0.0D;
     }
 
     /** Free-flight control: a velocity in blocks per tick, used whenever no target is set. */
     public void setCommandedVelocity(Vec3 velocity) {
+        this.clearFlightInput();
         this.commandedVelocity = velocity;
     }
 
@@ -190,6 +236,7 @@ public class DroneEntity extends Entity {
             return;
         }
 
+        this.applyYawInput();
         Vec3 velocity = this.stepVelocity();
         this.setDeltaMovement(velocity);
 
@@ -229,7 +276,17 @@ public class DroneEntity extends Entity {
         return stepped.lengthSqr() < MIN_MOVE ? Vec3.ZERO : stepped;
     }
 
+    private void applyYawInput() {
+        if (!this.inputFlight || this.inputYaw == 0.0D) {
+            return;
+        }
+        this.targetYaw = Mth.wrapDegrees(this.targetYaw + (float) this.inputYaw * this.maxYawRate);
+    }
+
     private Vec3 desiredVelocity() {
+        if (this.inputFlight) {
+            return this.velocityFromLook();
+        }
         if (this.targetPosition == null) {
             return this.clampToMaxSpeed(this.commandedVelocity);
         }
@@ -245,6 +302,34 @@ public class DroneEntity extends Entity {
 
         double speed = Math.min(this.maxSpeed, distance * this.acceleration * BRAKING_GAIN);
         return delta.scale(speed / distance);
+    }
+
+    /** Minecraft creative-style: W follows the camera, A/D strafe, Space/Shift are world up. */
+    private Vec3 velocityFromLook() {
+        float yaw = this.getYRot() * ((float) Math.PI / 180.0F);
+        float pitch = this.getXRot() * ((float) Math.PI / 180.0F);
+        double cosPitch = Math.cos(pitch);
+        double sinYaw = Math.sin(yaw);
+        double cosYaw = Math.cos(yaw);
+
+        double fx = -sinYaw * cosPitch;
+        double fy = -Math.sin(pitch);
+        double fz = cosYaw * cosPitch;
+        double rx = -cosYaw;
+        double rz = -sinYaw;
+
+        Vec3 world = new Vec3(
+                fx * this.inputForward + rx * this.inputRight,
+                fy * this.inputForward + this.inputUp,
+                fz * this.inputForward + rz * this.inputRight);
+        double length = world.length();
+        if (length < MIN_MOVE) {
+            return Vec3.ZERO;
+        }
+        if (length > 1.0D) {
+            world = world.scale(1.0D / length);
+        }
+        return world.scale(this.maxSpeed);
     }
 
     private Vec3 clampToMaxSpeed(Vec3 velocity) {

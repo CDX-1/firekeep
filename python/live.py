@@ -206,16 +206,45 @@ def order(drone_id, x, y, z):
     The mod collects these in the reply to its next feed POST, so an order costs no extra
     round trip and lands within a flush - about a fifth of a second.
     """
+    return _enqueue({"id": str(drone_id), "x": float(x), "y": float(y), "z": float(z)})
+
+
+def fly(drone_id, forward=0, right=0, up=0, yaw=0):
+    """
+    Queues a Minecraft-style stick: hold to keep flying, zeros (or hover()) to stop.
+
+    Directions are in the drone's camera frame. The mod rebuilds world velocity each
+    tick, so turning while a key is down keeps "forward" as forward.
+    """
+    if not (forward or right or up or yaw):
+        return hover(drone_id)
+    return _enqueue({
+        "id": str(drone_id),
+        "fly": True,
+        "forward": float(forward),
+        "right": float(right),
+        "up": float(up),
+        "yaw": float(yaw),
+    })
+
+
+def hover(drone_id):
+    """Queues a brake-and-hold for one drone."""
+    return _enqueue({"id": str(drone_id), "hover": True})
+
+
+def _enqueue(command):
     with _LOCK:
-        _COMMANDS.append({"id": str(drone_id), "x": float(x), "y": float(y), "z": float(z),
-                          "at": time.time()})
+        command["at"] = time.time()
+        _COMMANDS.append(command)
         return len(_COMMANDS)
 
 
 def _take_commands_locked():
     """Hands over every fresh order and clears the queue. Caller must hold the lock."""
     now = time.time()
-    out = [c for c in _COMMANDS if now - c["at"] < COMMAND_TTL]
+    out = [{k: v for k, v in c.items() if k != "at"}
+           for c in _COMMANDS if now - c["at"] < COMMAND_TTL]
     _COMMANDS.clear()
     return out
 

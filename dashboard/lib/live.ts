@@ -67,3 +67,28 @@ export async function sendDroneTo(id: string, x: number, y: number, z: number) {
   if (!res.ok) throw new Error(`goto -> ${res.status}`);
   return res.json() as Promise<{ ok: boolean; queued: number }>;
 }
+
+/** Minecraft-style stick in the drone's camera frame. Hold to fly; send zeros or hover to stop. */
+export async function sendDroneFly(
+  id: string,
+  stick: { forward?: number; right?: number; up?: number; yaw?: number },
+) {
+  const res = await fetch(`${BASE}/api/drones/fly`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, ...stick }),
+  });
+  if (!res.ok) throw new Error(`fly -> ${res.status}`);
+  return res.json() as Promise<{ ok: boolean; queued: number }>;
+}
+
+/** Brakes the drone and holds wherever it is. */
+export async function sendDroneHover(id: string) {
+  const res = await fetch(`${BASE}/api/drones/hover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) throw new Error(`hover -> ${res.status}`);
+  return res.json() as Promise<{ ok: boolean; queued: number }>;
+}

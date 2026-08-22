@@ -201,12 +201,21 @@ round trip:
 
 ```json
 { "ok": true, "columns": 2, "hot": 41, "watchers": 1,
-  "commands": [{ "id": "drone-1", "x": 40.0, "y": 91.0, "z": 12.0 }] }
+  "commands": [{ "id": "drone-1", "fly": true, "forward": 1, "right": 0, "up": 0, "yaw": 0 }] }
 ```
 
 ### `POST /api/drones/goto`
 
 `{ "id": "drone-1", "x": 40, "y": 91, "z": 12 }` - queues a flight for the mod to collect.
+
+### `POST /api/drones/fly`
+
+`{ "id": "drone-1", "forward": 1, "right": 0, "up": 0, "yaw": 0 }` - Minecraft-style stick
+in the camera frame. The drone keeps that velocity until a hover or goto. Zeros hover.
+
+### `POST /api/drones/hover`
+
+`{ "id": "drone-1" }` - brakes and holds.
 
 ### `GET /api/live`
 

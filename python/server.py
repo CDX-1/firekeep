@@ -448,6 +448,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": f"bad order: {e}"}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
 
+        # WASD stick: the drone keeps this velocity until a later hover or goto
+        if url.path == "/api/drones/fly":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                order = json.loads(self.rfile.read(max(0, length)))
+                queued = live.fly(order["id"], order.get("forward", 0), order.get("right", 0),
+                                  order.get("up", 0), order.get("yaw", 0))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad order: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
+
+        if url.path == "/api/drones/hover":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                order = json.loads(self.rfile.read(max(0, length)))
+                queued = live.hover(order["id"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad order: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
+
         if url.path != "/capture":
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 

@@ -325,8 +325,26 @@ public final class WorldFeed {
                     continue;
                 }
                 JsonObject order = element.getAsJsonObject();
+                if (!order.has("id")) {
+                    continue;
+                }
                 DroneEntity drone = findDrone(server, order.get("id").getAsString());
                 if (drone == null) {
+                    continue;
+                }
+                if (flag(order, "hover")) {
+                    drone.hover();
+                    continue;
+                }
+                if (flag(order, "fly")) {
+                    drone.setFlightInput(
+                            number(order, "forward"),
+                            number(order, "right"),
+                            number(order, "up"),
+                            number(order, "yaw"));
+                    continue;
+                }
+                if (!order.has("x") || !order.has("y") || !order.has("z")) {
                     continue;
                 }
                 drone.setTargetPosition(new Vec3(order.get("x").getAsDouble(),
@@ -334,6 +352,14 @@ public final class WorldFeed {
                 drone.setClearTargetOnArrival(true);
             }
         });
+    }
+
+    private static boolean flag(JsonObject order, String key) {
+        return order.has(key) && order.get(key).getAsBoolean();
+    }
+
+    private static double number(JsonObject order, String key) {
+        return order.has(key) ? order.get(key).getAsDouble() : 0.0D;
     }
 
     /** Looks a drone up by its feed id across every dimension. Server thread only. */

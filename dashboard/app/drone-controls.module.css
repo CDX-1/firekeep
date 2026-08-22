@@ -50,10 +50,6 @@
 .take { height: 26px; padding: 0 12px; font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
 .take[data-on="true"] { color: #eaf5f1; background: rgba(58, 96, 86, .9); outline-color: var(--accent); }
 
-.steps { display: flex; gap: 3px; }
-.steps button { width: 30px; height: 26px; font-size: 10px; font-variant-numeric: tabular-nums; }
-.steps button[data-active="true"] { color: #eaf5f1; background: rgba(58, 96, 86, .9); outline-color: var(--accent); }
-
 .status { order: 1; flex: 0 1 auto; margin: 0; padding: 6px 9px; overflow: hidden; color: #c9d2cd; background: rgba(12, 15, 13, .58); border-radius: 6px; backdrop-filter: blur(7px); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; opacity: 0; transition: opacity 160ms ease; }
 .controls:hover .status, .controls:focus-within .status, .controls[data-controlling="true"] .status { opacity: 1; }
 .status[data-error="true"] { color: #f0b6ac; opacity: 1; }
