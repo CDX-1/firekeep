@@ -4,95 +4,67 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import styles from "./risk-map.module.css";
 import { getWorld, worldMapUrl } from "@/lib/api";
 import { fallbackWorld } from "./fallback-world";
+import {
+  GRID_COLS,
+  GRID_ROWS,
+  MAX_RISK,
+  RISK_LABELS,
+  emptyGrid,
+  type RiskCell,
+  type RiskReport,
+} from "@/lib/risk";
 import type { WorldMeta } from "@/lib/types";
 
 // -------------------------------------------------------------------------
 // Types
 
-interface RiskCell {
-  col: number;
-  row: number;
-  /** 0-9 risk score: 0 = safest, 9 = most dangerous */
-  risk: number;
-  humidity: number;    // %
-  temperature: number; // °C
-  windSpeed: number;   // km/h
-  windDir: string;
-  droneId: string | null;
-}
-
 type View = { x: number; y: number; scale: number };
 type Backdrop = { meta: WorldMeta; image: CanvasImageSource; real: boolean };
 
 // -------------------------------------------------------------------------
-// Risk colour scale — 5 distinct bands, each covering 2 risk levels.
-// Fill colours are kept very transparent so the map shows through;
-// border colours are vivid so the grid reads clearly.
+// Risk colour scale — 5 bands, one per risk level.
+//
+// The overlay sits on a full-colour world map, so a plain translucent fill
+// would pick up whatever is underneath and read as a different colour over
+// water than over forest. To keep each band looking the same everywhere, the
+// grid is drawn in two passes: a uniform dark scrim over the whole map first,
+// then the band colours on top of that known, flat substrate.
 
-/** Map a 0-9 risk score to one of 5 colour bands. */
-function riskBand(risk: number): number { return Math.min(4, Math.floor(risk / 2)); }
+/** Map a 1-5 risk score to its 0-indexed colour band. */
+function riskBand(risk: number): number { return clampRisk(risk) - 1; }
+
+/** Flat dark wash laid over the map before any band colour is drawn. */
+const SCRIM = "rgba(9, 11, 16, 0.38)";
 
 const BAND_FILL = [
-  "rgba(34,  197,  94, 0.18)",  // 0-1 – green
-  "rgba(234, 204,   8, 0.20)",  // 2-3 – amber
-  "rgba(249, 115,  22, 0.22)",  // 4-5 – orange
-  "rgba(239,  68,  68, 0.26)",  // 6-7 – red
-  "rgba( 88,  28, 135, 0.32)",  // 8-9 – deep purple-red (extreme)
+  "rgba( 34, 197,  94, 0.42)",  // 1 – green
+  "rgba(234, 204,   8, 0.42)",  // 2 – amber
+  "rgba(249, 115,  22, 0.44)",  // 3 – orange
+  "rgba(239,  68,  68, 0.46)",  // 4 – red
+  "rgba(192,  38, 211, 0.48)",  // 5 – vivid purple (extreme)
 ] as const;
 
 const BAND_STROKE = [
-  "rgba( 34, 197,  94, 0.75)",  // green
-  "rgba(234, 179,   8, 0.85)",  // amber
-  "rgba(249, 115,  22, 0.90)",  // orange
-  "rgba(239,  68,  68, 0.90)",  // red
-  "rgba(192,  38, 211, 0.95)",  // vivid purple (extreme)
+  "rgb( 74, 222, 128)",  // green
+  "rgb(250, 204,  21)",  // amber
+  "rgb(251, 146,  60)",  // orange
+  "rgb(248, 113, 113)",  // red
+  "rgb(217,  70, 239)",  // vivid purple (extreme)
 ] as const;
 
-const BAND_LABELS = ["Low", "Guarded", "Moderate", "High", "Extreme"];
-
-const RISK_LABELS = [
-  "Minimal", "Very Low", "Low", "Guarded", "Moderate",
-  "Elevated", "High", "Very High", "Severe", "Extreme",
-];
-
-// Number of grid columns/rows to divide the map into
-const GRID_COLS = 10;
-const GRID_ROWS = 10;
+function clampRisk(risk: number): number { return Math.min(MAX_RISK, Math.max(1, Math.round(risk))); }
 
 // -------------------------------------------------------------------------
-// Mock data generation
+// The prediction backend
+//
+// /api/predict is served by this app rather than the Python server, because it holds the model
+// key. It answers 200 even when the model is unreachable, falling back to arithmetic over the
+// live fire feed, so there is no error branch to handle here - only a `source` to report.
 
-function generateRiskGrid(meta: WorldMeta): RiskCell[][] {
-  const cells: RiskCell[][] = [];
-  const seed = meta.name.length;
-
-  for (let row = 0; row < GRID_ROWS; row++) {
-    cells[row] = [];
-    for (let col = 0; col < GRID_COLS; col++) {
-      // Seeded pseudo-random-ish so it's stable across re-renders
-      const n  = Math.sin(seed + col * 7.3  + row * 13.7) * 0.5 + 0.5;
-      const n2 = Math.sin(seed + col * 3.1  + row *  5.9 + 1.4) * 0.5 + 0.5;
-      const n3 = Math.sin(seed + col * 11.2 + row *  2.3 + 2.7) * 0.5 + 0.5;
-
-      const humidity    = Math.round(10 + n  * 55);  // 10-65 %
-      const temperature = Math.round(18 + n2 * 28);  // 18-46 °C
-      const windSpeed   = Math.round(5  + n3 * 65);  // 5-70 km/h
-
-      const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-      const windDir = dirs[Math.floor(n3 * dirs.length)];
-
-      // Risk formula: low humidity + high temp + high wind = more risk
-      const rawRisk =
-        (1 - humidity / 65)    * 3.5 +
-        (temperature / 46)     * 3.0 +
-        (windSpeed / 70)       * 2.5;
-
-      const risk = Math.min(9, Math.max(0, Math.round(rawRisk)));
-
-      cells[row][col] = { col, row, risk, humidity, temperature, windSpeed, windDir, droneId: null };
-    }
-  }
-  return cells;
+async function fetchPrediction(signal: AbortSignal): Promise<RiskReport> {
+  const res = await fetch("/api/predict", { method: "POST", cache: "no-store", signal });
+  if (!res.ok) throw new Error(`/api/predict -> ${res.status}`);
+  return res.json() as Promise<RiskReport>;
 }
 
 // -------------------------------------------------------------------------
@@ -127,9 +99,15 @@ export default function RiskMap({ active }: { active: boolean }) {
 
   const [backdrop, setBackdrop] = useState<Backdrop | null>(null);
   const [cells, setCells] = useState<RiskCell[][]>([]);
-  const [selected, setSelected] = useState<RiskCell | null>(null);
+  const [report, setReport] = useState<RiskReport | null>(null);
+  const [predicting, setPredicting] = useState(false);
+  const [selected, setSelected] = useState<{ col: number; row: number } | null>(null);
   const [zoom, setZoom] = useState(1);
   const [hoveredCell, setHoveredCell] = useState<{ col: number; row: number } | null>(null);
+
+  // Read the selection out of the live grid rather than holding a copy, so a cell whose risk the
+  // model has just revised does not sit stale behind an open popup.
+  const selectedCell = selected ? cells[selected.row]?.[selected.col] ?? null : null;
 
   // -----------------------------------------------------------------------
   // Load world
@@ -140,11 +118,9 @@ export default function RiskMap({ active }: { active: boolean }) {
         const meta = await getWorld();
         const image = await loadImage(worldMapUrl());
         setBackdrop({ meta, image, real: true });
-        setCells(generateRiskGrid(meta));
       } catch {
         const fb = fallbackWorld();
         setBackdrop({ meta: fb.meta, image: fb.image, real: false });
-        setCells(generateRiskGrid(fb.meta));
       }
     }
     void load();
@@ -178,6 +154,41 @@ export default function RiskMap({ active }: { active: boolean }) {
   }, [fit]);
 
   useEffect(() => { if (active && !fittedRef.current) fit(); }, [active, backdrop, fit]);
+
+  // -----------------------------------------------------------------------
+  // Prediction lifecycle
+
+  const abortRef = useRef<AbortController | null>(null);
+
+  const predict = useCallback(async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setPredicting(true);
+    try {
+      const next = await fetchPrediction(controller.signal);
+      if (controller.signal.aborted) return;
+      setReport(next);
+      setCells(next.cells?.length ? next.cells : emptyGrid());
+    } catch {
+      // An aborted or failed request leaves the previous reading on screen, which is the right
+      // thing for a monitoring panel: the last known state beats a blank map.
+    } finally {
+      if (!controller.signal.aborted) setPredicting(false);
+    }
+  }, []);
+
+  // Predict when the tab is opened, then keep it fresh while it is being watched. The model is a
+  // 235B and the fire front does not move in seconds, so this is deliberately slow.
+  useEffect(() => {
+    if (!active) return;
+    void predict();
+    const timer = setInterval(() => void predict(), 90_000);
+    return () => {
+      clearInterval(timer);
+      abortRef.current?.abort();
+    };
+  }, [active, predict]);
 
   // -----------------------------------------------------------------------
   // Render map canvas
@@ -239,6 +250,12 @@ export default function RiskMap({ active }: { active: boolean }) {
     const cellW = mapW / GRID_COLS;
     const cellH = mapH / GRID_ROWS;
 
+    // Pass 1: flat scrim across the whole map, so every band colour lands on
+    // the same substrate regardless of the terrain beneath it.
+    ctx.fillStyle = SCRIM;
+    ctx.fillRect(vx, vy, mapW, mapH);
+
+    // Pass 2: band colours and borders.
     for (let row = 0; row < GRID_ROWS; row++) {
       for (let col = 0; col < GRID_COLS; col++) {
         const cell = cells[row]?.[col];
@@ -253,11 +270,11 @@ export default function RiskMap({ active }: { active: boolean }) {
         ctx.fillRect(cx, cy, cellW, cellH);
 
         ctx.strokeStyle = isSelected
-          ? "rgba(255, 255, 255, 0.95)"
+          ? "rgb(255, 255, 255)"
           : isHovered
-          ? "rgba(255, 255, 255, 0.60)"
+          ? "rgba(255, 255, 255, 0.85)"
           : BAND_STROKE[band];
-        ctx.lineWidth = isSelected ? 2.5 : isHovered ? 1.5 : 0.6;
+        ctx.lineWidth = isSelected ? 3 : isHovered ? 2 : 1.25;
         ctx.strokeRect(cx + 0.5, cy + 0.5, cellW - 1, cellH - 1);
       }
     }
@@ -356,13 +373,7 @@ export default function RiskMap({ active }: { active: boolean }) {
 
     if (isDragging.current && pointerMoved.current < 6) {
       // It's a click
-      const pos = screenToCell(sx, sy);
-      if (pos) {
-        const cell = cells[pos.row]?.[pos.col];
-        if (cell) setSelected(cell);
-      } else {
-        setSelected(null);
-      }
+      setSelected(screenToCell(sx, sy));
     }
     isDragging.current = false;
   };
@@ -414,7 +425,7 @@ export default function RiskMap({ active }: { active: boolean }) {
         />
 
         {/* Cell detail popup — click anywhere outside to dismiss */}
-        {selected && popupPos && (
+        {selectedCell && popupPos && (
           <div
             className={styles.popup}
             style={{
@@ -426,19 +437,26 @@ export default function RiskMap({ active }: { active: boolean }) {
             aria-label="Cell risk details"
           >
             <div className={styles.popupRisk}>
-              <span className={styles.popupRiskDot} style={{ background: BAND_STROKE[riskBand(selected.risk)] }} />
-              <strong>{RISK_LABELS[selected.risk]}</strong>
-              <span className={styles.popupScore}>Risk Score: {selected.risk}/9</span>
+              <span className={styles.popupRiskDot} style={{ background: BAND_STROKE[riskBand(selectedCell.risk)] }} />
+              <strong>{RISK_LABELS[riskBand(selectedCell.risk)]}</strong>
+              <span className={styles.popupScore}>Risk {selectedCell.risk}/{MAX_RISK}</span>
             </div>
+            {selectedCell.note && <p className={styles.popupNote}>{selectedCell.note}</p>}
             <div className={styles.popupGrid}>
-              <span className={styles.popupKey}>Humidity</span>
-              <span className={styles.popupVal}>{selected.humidity}%</span>
-              <span className={styles.popupKey}>Temperature</span>
-              <span className={styles.popupVal}>{selected.temperature}°C</span>
-              <span className={styles.popupKey}>Wind</span>
-              <span className={styles.popupVal}>{selected.windSpeed} km/h {selected.windDir}</span>
+              <span className={styles.popupKey}>Burning</span>
+              <span className={styles.popupVal}>
+                {selectedCell.fires > 0 ? `${selectedCell.fires} columns` : "nothing alight"}
+              </span>
+              <span className={styles.popupKey}>Nearest fire</span>
+              <span className={styles.popupVal}>
+                {selectedCell.nearestFire == null ? "—" : `${selectedCell.nearestFire} blocks`}
+              </span>
+              <span className={styles.popupKey}>Recent events</span>
+              <span className={styles.popupVal}>{selectedCell.events || "none"}</span>
+              <span className={styles.popupKey}>Drones</span>
+              <span className={styles.popupVal}>{selectedCell.drones || "none on station"}</span>
               <span className={styles.popupKey}>Grid cell</span>
-              <span className={styles.popupVal}>col {selected.col + 1}, row {selected.row + 1}</span>
+              <span className={styles.popupVal}>col {selectedCell.col + 1}, row {selectedCell.row + 1}</span>
             </div>
           </div>
         )}
@@ -464,15 +482,49 @@ export default function RiskMap({ active }: { active: boolean }) {
       {/* Side panel: legend + summary */}
       <aside className={styles.legend}>
         <header className={styles.legendHeader}>
-          <span>Risk Scale</span>
-          <span className={styles.legendSub}>5 bands</span>
+          <span>Fire Risk</span>
+          <button
+            type="button"
+            className={styles.legendRefresh}
+            onClick={() => void predict()}
+            disabled={predicting}
+          >
+            {predicting ? "Reading…" : "Re-run"}
+          </button>
         </header>
 
+        {report && (
+          <div className={styles.provenance}>
+            <span
+              className={`${styles.sourceBadge} ${report.source === "ai" ? styles.sourceAi : styles.sourceBaseline}`}
+            >
+              {report.source === "ai" ? "AI forecast" : "Baseline"}
+            </span>
+            <span className={styles.provenanceMeta}>
+              {report.observed.fires} burning · {report.observed.drones} drones
+              {report.observed.live ? "" : " · feed stale"}
+            </span>
+          </div>
+        )}
+
+        {/* The model's read, and - when it could not be reached - why not. */}
+        {report?.briefing && (
+          <div className={styles.briefing}>
+            <p className={styles.briefingBody}>{report.briefing}</p>
+            {report.spread && <p className={styles.briefingSpread}>{report.spread}</p>}
+          </div>
+        )}
+        {report?.error && (
+          <p className={styles.fallbackNote}>
+            Model unavailable, showing live-fire arithmetic. {report.error}
+          </p>
+        )}
+
         <div className={styles.legendScale}>
-          {BAND_LABELS.map((label, i) => (
+          {RISK_LABELS.map((label, i) => (
             <div key={i} className={styles.legendItem}>
               <span className={styles.legendSwatch} style={{ background: BAND_STROKE[i] }} />
-              <span className={styles.legendLabel}>{label}</span>
+              <span className={styles.legendLabel}>{i + 1} · {label}</span>
             </div>
           ))}
         </div>
@@ -482,9 +534,9 @@ export default function RiskMap({ active }: { active: boolean }) {
         <div className={styles.legendInfo}>
           <p className={styles.legendInfoTitle}>How risk is calculated</p>
           <p className={styles.legendInfoBody}>
-            Each grid cell is scored using drone-reported humidity, temperature, and
-            wind speed. Low humidity, high temperatures, and strong winds all raise
-            the fire risk score.
+            Live burning columns, the disaster log and drone positions are binned onto
+            the grid, then read by a model that projects where the front moves next.
+            If it cannot be reached, the map falls back to fire density alone.
           </p>
         </div>
 
@@ -505,8 +557,10 @@ export default function RiskMap({ active }: { active: boolean }) {
                   role="button"
                   tabIndex={0}
                   aria-label={`Select hotspot at col ${maxRisk.col + 1}, row ${maxRisk.row + 1}`}
-                  onClick={() => setSelected(maxRisk)}
-                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setSelected(maxRisk); }}
+                  onClick={() => setSelected({ col: maxRisk.col, row: maxRisk.row })}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") setSelected({ col: maxRisk.col, row: maxRisk.row });
+                  }}
                 >
                   <span className={styles.legendStatLabel}>Hotspot ↗</span>
                   <span className={styles.legendStatValue} style={{ color: BAND_STROKE[riskBand(maxRisk.risk)] }}>
@@ -516,7 +570,7 @@ export default function RiskMap({ active }: { active: boolean }) {
                 <div className={styles.legendStat}>
                   <span className={styles.legendStatLabel}>Peak risk</span>
                   <span className={styles.legendStatValue} style={{ color: BAND_STROKE[riskBand(maxRisk.risk)] }}>
-                    {maxRisk.risk}/9
+                    {maxRisk.risk}/{MAX_RISK}
                   </span>
                 </div>
               </div>

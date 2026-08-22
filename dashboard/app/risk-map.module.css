@@ -277,3 +277,89 @@
 @media (prefers-reduced-motion: reduce) {
   .zoomControls button { transition: none; }
 }
+
+/* ---- prediction provenance + briefing ---- */
+
+/* Re-runs inference by hand. Sits in the legend header opposite the title, where the old
+   "5 bands" caption used to be - the scale is self-describing now that each row is numbered. */
+.legendRefresh {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 10px;
+  color: var(--accent);
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.legendRefresh:hover:not(:disabled) { text-decoration: underline; }
+.legendRefresh:disabled { color: var(--muted); cursor: default; }
+
+.provenance {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px 10px;
+}
+
+/* Whether this reading came from the model or the fallback is the first thing an operator
+   needs to know about it, so it is a badge rather than a line of prose. */
+.sourceBadge {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.sourceAi {
+  color: var(--accent);
+  background: var(--accent-soft);
+  outline: 1px solid rgba(143, 184, 174, 0.3);
+}
+.sourceBaseline {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  outline: 1px solid var(--line);
+}
+
+.provenanceMeta {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+}
+
+.briefing {
+  padding: 0 13px 11px;
+}
+.briefingBody {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.briefingSpread {
+  margin: 6px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+  padding-left: 8px;
+  border-left: 2px solid var(--line);
+}
+
+.fallbackNote {
+  margin: 0;
+  padding: 0 13px 11px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* The model's reason for singling this cell out, above the raw counts it read. */
+.popupNote {
+  margin: 0 0 8px;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text);
+  opacity: 0.85;
+}
