@@ -25,9 +25,12 @@ import uuid
 from pathlib import Path
 from time import monotonic, sleep
 
+import n8n
 from marble import SSL_CTX, download
 
-BASE = "https://smallwoken.app.n8n.cloud/webhook/minecraft-wildfire"
+#: Kept as a module attribute so callers can print it, but n8n.py owns the value - every
+#: URL this project has for n8n is configured in one place.
+BASE = n8n.wildfire_url()
 
 # n8n holds the World Labs key, so a wildfire job costs this project nothing
 CREDITS = 0
@@ -85,8 +88,9 @@ def message(payload):
     return str(error) if error else "no reason given"
 
 
-def start(image_bytes, extension=".png", *, base=BASE, timeout=180):
+def start(image_bytes, extension=".png", *, base=None, timeout=180):
     """Hand the workflow a screenshot. Returns {operation_id, status_url, prompt}."""
+    base = base or n8n.wildfire_url()
     body, ctype = multipart("data", f"source{extension}", image_bytes)
     payload = request("POST", base, body=body, content_type=ctype, timeout=timeout)
 

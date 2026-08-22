@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonObject;
 import dev.awsaf.firekeep.Firekeep;
+import dev.awsaf.firekeep.net.FirekeepServer;
 import net.fabricmc.loader.api.FabricLoader;
 
 import java.io.IOException;
@@ -17,14 +18,18 @@ import java.util.HexFormat;
  * Everything the drone bridge needs to know about the outside world, read from
  * {@code config/firekeep-drones.json} and overridable per-run by environment variables.
  *
- * <p>Nothing here is hardcoded at a call site: the API port, the n8n URLs, the shared secret and
+ * <p>Nothing here is hardcoded at a call site: the API port, the hub URL, the shared secrets and
  * the perception radii all come through this object. A missing file is written back as a
  * fully-populated template, with a freshly generated API key, so a first run leaves something
  * usable on disk rather than an empty stub.
  *
+ * <p>There is no n8n here any more, deliberately. The mod knows about exactly two addresses:
+ * the port it listens on, which stays on loopback, and the hub it reports to. Which workflows
+ * exist, where they live and what they are allowed to see is the hub's business.
+ *
  * <p>Environment variables win over the file, because that is how you point one build at a
- * different n8n without editing anything:
- * {@code N8N_BASE_URL}, {@code N8N_WEBHOOK_URL}, {@code DRONE_API_KEY},
+ * different hub without editing anything:
+ * {@code FIREKEEP_SERVER}, {@code FIREKEEP_API_KEY}, {@code DRONE_API_KEY},
  * {@code DRONE_API_PORT}, {@code PERCEPTION_RADIUS}, {@code PERCEPTION_VERTICAL_RADIUS}.
  */
 public final class DroneConfig {
@@ -37,12 +42,11 @@ public final class DroneConfig {
     public final int apiPort;
     public final String apiKey;
 
-    // ---- n8n
-    public final String n8nBaseUrl;
-    public final String n8nWebhookUrl;
-    /** Header n8n expects on inbound webhooks, so the flow can reject anything else. */
-    public final String n8nAuthHeader;
-    public final String n8nAuthValue;
+    // ---- hub
+    /** Blank means "wherever {@link dev.awsaf.firekeep.net.FirekeepServer} is pointed". */
+    public final String hubUrl;
+    /** Bearer token the hub wants, if it was started with one. */
+    public final String hubKey;
     public final boolean pushPerception;
     public final int perceptionPushIntervalSeconds;
     public final boolean eventsEnabled;
@@ -86,17 +90,13 @@ public final class DroneConfig {
         this.apiPort = envInt("DRONE_API_PORT", "firekeep.drone.api.port", integer(api, "port", 8090));
         this.apiKey = envString("DRONE_API_KEY", "firekeep.drone.api.key", string(api, "apiKey", ""));
 
-        JsonObject n8n = child(root, "n8n");
-        this.n8nBaseUrl = trimSlash(envString("N8N_BASE_URL", "firekeep.n8n.baseUrl",
-                string(n8n, "baseUrl", "http://127.0.0.1:5678")));
-        this.n8nWebhookUrl = envString("N8N_WEBHOOK_URL", "firekeep.n8n.webhookUrl",
-                string(n8n, "webhookUrl", ""));
-        this.n8nAuthHeader = string(n8n, "authHeader", "X-Firekeep-Key");
-        this.n8nAuthValue = envString("N8N_WEBHOOK_KEY", "firekeep.n8n.webhookKey",
-                string(n8n, "authValue", ""));
-        this.pushPerception = bool(n8n, "pushPerception", false);
-        this.perceptionPushIntervalSeconds = clamp(integer(n8n, "perceptionPushIntervalSeconds", 5), 1, 3600);
-        this.eventsEnabled = bool(n8n, "events", true);
+        JsonObject hub = child(root, "hub");
+        this.hubUrl = trimSlash(envString("FIREKEEP_SERVER", "firekeep.server",
+                string(hub, "url", "")));
+        this.hubKey = envString("FIREKEEP_API_KEY", "firekeep.api.key", string(hub, "apiKey", ""));
+        this.pushPerception = bool(hub, "pushPerception", false);
+        this.perceptionPushIntervalSeconds = clamp(integer(hub, "perceptionPushIntervalSeconds", 5), 1, 3600);
+        this.eventsEnabled = bool(hub, "events", true);
 
         JsonObject perception = child(root, "perception");
         this.perceptionRadius = clamp(envInt("PERCEPTION_RADIUS", "firekeep.perception.radius",
@@ -131,8 +131,14 @@ public final class DroneConfig {
         return this.maxSpeedBlocksPerSecond / 20.0D;
     }
 
-    public boolean hasWebhook() {
-        return this.eventsEnabled && !this.n8nWebhookUrl.isBlank();
+    /**
+     * Where to report to.
+     *
+     * <p>An empty {@code hub.url} is the normal case and not a missing setting: it means "the
+     * same server the screenshots go to", so there is one address to change rather than two.
+     */
+    public String hubUrl() {
+        return this.hubUrl.isBlank() ? FirekeepServer.baseUrl() : this.hubUrl;
     }
 
     // ---------------------------------------------------------------- loading
@@ -155,8 +161,8 @@ public final class DroneConfig {
 
         DroneConfig config = new DroneConfig(root);
         if (config.apiKey.isBlank()) {
-            // An open control API on a machine that also runs n8n is not something to leave to
-            // chance, so mint a key rather than defaulting to "no auth".
+            // An open remote control for a running server is not something to leave to chance
+            // even on loopback, so mint a key rather than defaulting to "no auth".
             config = new DroneConfig(withGeneratedKey(root));
             fresh = true;
         }
@@ -176,8 +182,10 @@ public final class DroneConfig {
     /** Writes the config back out fully expanded, so every knob is visible and editable. */
     private static void write(Path path, DroneConfig c) {
         JsonObject root = new JsonObject();
-        root.addProperty("_comment", "Fire Keep drone bridge. Environment overrides: N8N_BASE_URL, "
-                + "N8N_WEBHOOK_URL, DRONE_API_KEY, DRONE_API_PORT, PERCEPTION_RADIUS, "
+        root.addProperty("_comment", "Fire Keep drone bridge. The API below stays on loopback - the "
+                + "python hub is the only thing that calls it, and the only thing exposed. Leave "
+                + "hub.url blank to use FIREKEEP_SERVER. Environment overrides: FIREKEEP_SERVER, "
+                + "FIREKEEP_API_KEY, DRONE_API_KEY, DRONE_API_PORT, PERCEPTION_RADIUS, "
                 + "PERCEPTION_VERTICAL_RADIUS.");
 
         JsonObject api = new JsonObject();
@@ -187,15 +195,13 @@ public final class DroneConfig {
         api.addProperty("apiKey", c.apiKey);
         root.add("api", api);
 
-        JsonObject n8n = new JsonObject();
-        n8n.addProperty("baseUrl", c.n8nBaseUrl);
-        n8n.addProperty("webhookUrl", c.n8nWebhookUrl);
-        n8n.addProperty("authHeader", c.n8nAuthHeader);
-        n8n.addProperty("authValue", c.n8nAuthValue);
-        n8n.addProperty("events", c.eventsEnabled);
-        n8n.addProperty("pushPerception", c.pushPerception);
-        n8n.addProperty("perceptionPushIntervalSeconds", c.perceptionPushIntervalSeconds);
-        root.add("n8n", n8n);
+        JsonObject hub = new JsonObject();
+        hub.addProperty("url", c.hubUrl);
+        hub.addProperty("apiKey", c.hubKey);
+        hub.addProperty("events", c.eventsEnabled);
+        hub.addProperty("pushPerception", c.pushPerception);
+        hub.addProperty("perceptionPushIntervalSeconds", c.perceptionPushIntervalSeconds);
+        root.add("hub", hub);
 
         JsonObject perception = new JsonObject();
         perception.addProperty("radius", c.perceptionRadius);

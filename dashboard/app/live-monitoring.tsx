@@ -5,6 +5,7 @@ import styles from "./live-monitoring.module.css";
 import { AREAS, type Filter } from "./drones";
 import { CameraIcon, Chevron, EmptyImage } from "./icons";
 import DroneControls from "./drone-controls";
+import DroneEventWindow from "./drone-event-window";
 import FlightTelemetry, { type DroneTrailPoint } from "./flight-telemetry";
 import { detailSizeFor, streamUrl, type Profile, type Size } from "@/lib/cameras";
 import { pauseFrames } from "@/lib/frames";
@@ -197,6 +198,7 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
                     button inside a button is not a thing a browser will honour. */}
                 <button className={styles.open} type="button" aria-label={`Open ${drone.id} feed`} onClick={() => setSelectedId(drone.id)} />
                 <span className={styles.feedLabel}>{drone.id}</span>
+                <DroneEventWindow droneId={drone.id} compact />
                 {/* The overlay owns the controls once it is open, so only ever one panel is
                     listening for the keys. */}
                 {focusedDrone?.id === drone.id && selectedId === null && (
@@ -237,6 +239,7 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
             </button>}
             <div className={styles.viewerPanel} key={selectedDrone.id}>
               <Feed id={selectedDrone.id} mode="stream" transport={transport} />
+              <DroneEventWindow droneId={selectedDrone.id} />
               {/* Where it is, and what the agent is actually rendering it at - which goes up
                   while this is the feed on screen and drops back on its own once it closes. */}
               <span className={styles.readout}>

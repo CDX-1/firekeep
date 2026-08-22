@@ -14,8 +14,9 @@ import java.util.Map;
 /**
  * The mod's outbound notice board: every agent detection and drone outcome goes through here.
  *
- * <p>Two consumers, deliberately. Events are pushed to the configured n8n webhook and kept in a
- * short ring buffer so {@code GET /api/events} still works when that webhook is unavailable.
+ * <p>Two consumers, deliberately. Events are pushed to the hub, which decides who else hears
+ * about them, and kept in a short ring buffer so {@code GET /api/events} still answers when the
+ * hub is down.
  *
  * <p>The interesting work is suppression. A forest fire changes state every tick, and an agent
  * that receives {@code fire_detected} twenty times a second is worse than one that receives it
@@ -30,12 +31,12 @@ public final class DroneEvents {
     private static final Map<String, Long> REPORTED = new HashMap<>();
 
     private static volatile DroneConfig config;
-    private static volatile N8nClient client;
+    private static volatile HubClient client;
 
     private DroneEvents() {
     }
 
-    public static void start(DroneConfig droneConfig, N8nClient eventClient) {
+    public static void start(DroneConfig droneConfig, HubClient eventClient) {
         config = droneConfig;
         client = eventClient;
         synchronized (RECENT) {
@@ -53,9 +54,9 @@ public final class DroneEvents {
             }
         }
 
-        N8nClient sink = client;
+        HubClient sink = client;
         DroneConfig current = config;
-        if (sink != null && current != null && current.hasWebhook()) {
+        if (sink != null && current != null && current.eventsEnabled) {
             sink.send(record.toJson());
         }
         Firekeep.LOGGER.debug("drone event {} ({})", event, droneId);
