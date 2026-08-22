@@ -5,7 +5,14 @@ import styles from "./live-monitoring.module.css";
 import { AREAS, type Area, type Filter } from "./drones";
 import { CameraIcon, Chevron, EmptyImage } from "./icons";
 import DroneControls from "./drone-controls";
-import { ROSTER_INTERVAL_MS, TILE_INTERVAL_MS, areaOf, getDrones, streamUrl } from "@/lib/cameras";
+import {
+  ROSTER_CONTROL_INTERVAL_MS,
+  ROSTER_INTERVAL_MS,
+  TILE_INTERVAL_MS,
+  areaOf,
+  getDrones,
+  streamUrl,
+} from "@/lib/cameras";
 import { fetchFrame, pauseFrames } from "@/lib/frames";
 import type { DroneCamera } from "@/lib/types";
 
@@ -14,20 +21,36 @@ const FRAME_RETRY_MS = 600;
 
 type Drone = DroneCamera & { area: Area };
 
+/**
+ * How a feed is being fed.
+ *
+ * `still` is the grid default: single frames, taken in turn with every other tile. `stream` is
+ * one long-lived MJPEG response that runs as fast as the agent renders, which is worth a
+ * connection only for a feed somebody is actually watching. `off` keeps the last frame on screen
+ * and asks for nothing.
+ */
+type FeedMode = "off" | "still" | "stream";
+
 export default function LiveMonitoring() {
-  const { drones, offline } = useDroneRoster();
   const [activeFilter, setActiveFilter] = useState<Filter>("All");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // Both held by id, not by object: the roster is replaced on every poll, so anything
-  // remembered by reference would be stale a second later.
+  // Held by id, not by object: the roster is replaced on every poll, so anything remembered by
+  // reference would be stale a second later.
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [controllingId, setControllingId] = useState<string | null>(null);
+
+  // Flying by hand needs a fresher position than a wall of thumbnails does.
+  const { drones, offline } = useDroneRoster(controllingId ? ROSTER_CONTROL_INTERVAL_MS : ROSTER_INTERVAL_MS);
 
   const filteredDrones = activeFilter === "All" ? drones : drones.filter((drone) => drone.area === activeFilter);
   const focusedDrone = focusedId ? drones.find((drone) => drone.id === focusedId) ?? null : null;
   const visibleDrones = focusedDrone ? [focusedDrone] : filteredDrones;
   const selectedIndex = selectedId ? visibleDrones.findIndex((drone) => drone.id === selectedId) : -1;
   const selectedDrone = selectedIndex >= 0 ? visibleDrones[selectedIndex] : null;
+
+  /** The one drone on screen in its own right, and so the only one that can be flown. */
+  const watchedId = selectedDrone ? selectedDrone.id : (selectedId === null ? focusedDrone?.id ?? null : null);
 
   const selectArea = (area: Filter) => {
     setActiveFilter(area);
@@ -49,25 +72,39 @@ export default function LiveMonitoring() {
     if (focusedId && !focusedDrone) setFocusedId(null);
   }, [focusedId, focusedDrone]);
 
+  // Control belongs to whatever is being watched; look away and you have handed it back.
+  useEffect(() => {
+    if (controllingId && controllingId !== watchedId) setControllingId(null);
+  }, [controllingId, watchedId]);
+
   // The grid is behind a full-screen overlay while the viewer is open, so it has nothing to
-  // show and no business holding connections the viewer's stream needs.
+  // show and no business holding connections the viewer needs.
   useEffect(() => {
     pauseFrames(selectedId !== null);
     return () => pauseFrames(false);
   }, [selectedId]);
 
   useEffect(() => {
-    if (!selectedDrone) return;
+    if (!selectedDrone && !controllingId) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedId(null);
+      if (event.key === "Escape") {
+        // Escape backs out one layer at a time: first hand back control, then close the viewer.
+        if (controllingId) setControllingId(null);
+        else if (selectedDrone) setSelectedId(null);
+        return;
+      }
+      // Switching drones mid-flight would take the camera off the one being flown.
+      if (!selectedDrone || controllingId) return;
       if (event.key === "ArrowLeft") moveViewer(-1);
       if (event.key === "ArrowRight") moveViewer(1);
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedDrone, selectedIndex, visibleDrones]);
+  }, [selectedDrone, selectedIndex, visibleDrones, controllingId]);
+
+  const toggleControl = (id: string) => (next: boolean) => setControllingId(next ? id : null);
 
   return (
     <>
@@ -110,14 +147,25 @@ export default function LiveMonitoring() {
           {visibleDrones.map((drone) => (
             <article className={styles.feed} key={drone.id}>
               <button className={styles.viewport} type="button" aria-label={`Open ${drone.id} feed`} onClick={() => setSelectedId(drone.id)}>
-                <TileFeed id={drone.id} active={selectedId === null} />
+                {/* Singled out from the sidebar there is only this one tile, so it can afford the
+                    connection a stream costs - and flying by hand needs every frame it can get. */}
+                <Feed
+                  id={drone.id}
+                  ratio
+                  mode={selectedId !== null ? "off" : focusedDrone?.id === drone.id ? "stream" : "still"}
+                />
                 <span className={styles.feedLabel}>{drone.id}</span>
               </button>
-              {/* Singled out from the sidebar and not expanded: this is the drone being watched,
-                  so it gets the controls. The overlay owns them once it is open, so only ever
-                  one panel is listening for the keys. */}
+              {/* The overlay owns the controls once it is open, so only ever one panel is
+                  listening for the keys. */}
               {focusedDrone?.id === drone.id && selectedId === null && (
-                <div className={styles.tileControls}><DroneControls drone={drone} /></div>
+                <div className={styles.tileControls}>
+                  <DroneControls
+                    drone={drone}
+                    controlling={controllingId === drone.id}
+                    onToggleControl={toggleControl(drone.id)}
+                  />
+                </div>
               )}
             </article>
           ))}
@@ -138,15 +186,19 @@ export default function LiveMonitoring() {
           if (event.target === event.currentTarget) setSelectedId(null);
         }}>
           <div className={styles.viewer} data-single={visibleDrones.length === 1}>
-            {visibleDrones.length > 1 && <button className={styles.viewerArrow} type="button" aria-label="Previous drone feed" onClick={() => moveViewer(-1)}>
+            {visibleDrones.length > 1 && !controllingId && <button className={styles.viewerArrow} type="button" aria-label="Previous drone feed" onClick={() => moveViewer(-1)}>
               <Chevron direction="left" />
             </button>}
             <div className={styles.viewerPanel} key={selectedDrone.id}>
-              <div className={styles.viewerImage}><LiveFeed id={selectedDrone.id} /></div>
+              <div className={styles.viewerImage}><Feed id={selectedDrone.id} mode="stream" /></div>
               <p>{selectedDrone.id} - {Math.round(selectedDrone.x)}, {Math.round(selectedDrone.y)}, {Math.round(selectedDrone.z)}</p>
-              <DroneControls drone={selectedDrone} />
+              <DroneControls
+                drone={selectedDrone}
+                controlling={controllingId === selectedDrone.id}
+                onToggleControl={toggleControl(selectedDrone.id)}
+              />
             </div>
-            {visibleDrones.length > 1 && <button className={styles.viewerArrow} type="button" aria-label="Next drone feed" onClick={() => moveViewer(1)}>
+            {visibleDrones.length > 1 && !controllingId && <button className={styles.viewerArrow} type="button" aria-label="Next drone feed" onClick={() => moveViewer(1)}>
               <Chevron direction="right" />
             </button>}
           </div>
@@ -157,7 +209,7 @@ export default function LiveMonitoring() {
 }
 
 /** Polls the mod for the live roster, so drones appear and disappear on their own. */
-function useDroneRoster() {
+function useDroneRoster(intervalMs: number) {
   const [drones, setDrones] = useState<Drone[]>([]);
   const [offline, setOffline] = useState(false);
 
@@ -179,23 +231,23 @@ function useDroneRoster() {
     };
 
     poll();
-    const timer = setInterval(poll, ROSTER_INTERVAL_MS);
+    const timer = setInterval(poll, intervalMs);
     return () => {
       cancelled = true;
       controller.abort();
       clearInterval(timer);
     };
-  }, []);
+  }, [intervalMs]);
 
   return { drones, offline };
 }
 
 /**
- * The newest frame for one drone, refreshed while `active`.
+ * The newest still for one drone, refreshed while `active`.
  *
- * <p>Frames are fetched through the shared queue in lib/frames rather than by the tile itself,
- * so a wall of them takes turns instead of racing for the browser's handful of connections to
- * this origin. The last frame is kept when a tile goes quiet, so nothing blanks out.
+ * <p>Frames are fetched through the shared queue in lib/frames rather than by the caller itself,
+ * so a wall of tiles takes turns instead of racing for the browser's handful of connections to
+ * this origin. The last frame is kept when a feed goes quiet, so nothing blanks out.
  */
 function useDroneFrame(id: string, active: boolean, priority = false) {
   const [src, setSrc] = useState<string | null>(null);
@@ -248,52 +300,46 @@ function useDroneFrame(id: string, active: boolean, priority = false) {
   return src;
 }
 
-/** A grid tile: stills, taken in turn with every other tile. */
-function TileFeed({ id, active }: { id: string; active: boolean }) {
-  const src = useDroneFrame(id, active);
-
-  if (!src) return <EmptyImage ratio label="Waiting for the first frame" />;
-  return <img className={styles.feedImage} src={src} alt={`${id} camera`} />;
-}
-
 /**
- * The expanded viewer: one long-lived MJPEG response, decoded by the browser as it arrives.
+ * One drone's picture.
  *
- * <p>A stream takes a moment to open, so a still is fetched alongside it and shown first. That
- * is what stops the drone you just opened from sitting behind "no image" while it connects.
- * Once the stream delivers a frame it takes over and the stills stop.
+ * <p>A stream takes a moment to open, so stills are fetched alongside it and shown first. That is
+ * what stops a feed you just opened from sitting behind "no image" while it connects; once the
+ * stream delivers a frame it takes over and the stills stop.
  */
-function LiveFeed({ id }: { id: string }) {
+function Feed({ id, mode, ratio = false }: { id: string; mode: FeedMode; ratio?: boolean }) {
   const [streaming, setStreaming] = useState(false);
-  // Priority: this is the drone being watched, so its still never queues behind the grid.
-  const snapshot = useDroneFrame(id, !streaming, true);
+  const wantStream = mode === "stream";
+  const still = useDroneFrame(id, mode !== "off" && !streaming, wantStream);
   const image = useRef<HTMLImageElement>(null);
 
   useEffect(() => {
     setStreaming(false);
     const element = image.current;
-    // Dropping the src is what actually closes the connection when the viewer moves on.
+    // Dropping the src is what actually closes the connection when this feed stops streaming.
     return () => element?.setAttribute("src", "");
-  }, [id]);
+  }, [id, wantStream]);
 
   return (
     <>
-      {!streaming && (snapshot
-        ? <img className={styles.feedImage} src={snapshot} alt={`${id} camera`} />
-        : <EmptyImage label="Connecting to the feed" />)}
-      <img
-        ref={image}
-        className={styles.feedImage}
-        style={streaming ? undefined : { display: "none" }}
-        src={streamUrl(id)}
-        alt={`${id} camera`}
-        onLoad={() => setStreaming(true)}
-      />
+      {!(wantStream && streaming) && (still
+        ? <img className={styles.feedImage} src={still} alt={`${id} camera`} />
+        : <EmptyImage ratio={ratio} label={wantStream ? "Connecting to the feed" : "Waiting for the first frame"} />)}
+      {wantStream && (
+        <img
+          ref={image}
+          className={styles.feedImage}
+          style={streaming ? undefined : { display: "none" }}
+          src={streamUrl(id)}
+          alt={`${id} camera`}
+          onLoad={() => setStreaming(true)}
+        />
+      )}
     </>
   );
 }
 
-/** A cancellable sleep, so a tile that goes away stops waiting rather than finishing its nap. */
+/** A cancellable sleep, so a feed that goes away stops waiting rather than finishing its nap. */
 function wait(ms: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
     if (signal.aborted) return reject(new DOMException("aborted", "AbortError"));

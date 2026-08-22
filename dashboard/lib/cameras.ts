@@ -5,6 +5,15 @@ const BASE = "/camera";
 
 /** How often the roster is re-read, so a drone that just took off shows up on its own. */
 export const ROSTER_INTERVAL_MS = 1000;
+
+/**
+ * The roster rate while somebody is flying a drone by hand.
+ *
+ * Each order aims a step ahead of where the drone is, so how fresh that position is decides how
+ * smoothly a held key flies. Once a second is fine for a wall of thumbnails and much too coarse
+ * for flying; this is one small JSON request, and only while a drone is actually being flown.
+ */
+export const ROSTER_CONTROL_INTERVAL_MS = 250;
 /**
  * How long a grid tile waits after painting before asking for another frame.
  *
