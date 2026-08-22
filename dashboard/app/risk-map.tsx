@@ -60,9 +60,9 @@ function clampRisk(risk: number): number { return Math.min(MAX_RISK, Math.max(1,
 // -------------------------------------------------------------------------
 // The prediction backend
 //
-// /api/predict is served by this app rather than the Python server, because it holds the model
-// key. It answers 200 even when the model is unreachable, falling back to arithmetic over the
-// live fire feed, so there is no error branch to handle here - only a `source` to report.
+// /api/predict runs the spread model over the live fire feed: burn envelope downwind of the
+// front, plus the ember-cast pockets ahead of it. It answers 200 even when the feed is missing,
+// falling back to an empty grid, so there is no error branch to handle here - only a `source`.
 
 async function fetchPrediction(signal: AbortSignal): Promise<RiskReport> {
   const res = await fetch("/api/predict", { method: "POST", cache: "no-store", signal });
@@ -113,14 +113,14 @@ export default function RiskMap({ active, onOpenDroneFeed }: {
   const [hoveredCell, setHoveredCell] = useState<{ col: number; row: number } | null>(null);
 
   // Read the selection out of the live grid rather than holding a copy, so a cell whose risk the
-  // model has just revised does not sit stale behind an open popup.
+  // forecast has just revised does not sit stale behind an open popup.
   const selectedCell = selected ? cells[selected.row]?.[selected.col] ?? null : null;
 
   /*
    * Who is over the selected cell, right now.
    *
-   * The report carries a drone *count* per cell, taken when the model was asked - which can be
-   * ninety seconds old, and never said which aircraft anyway. The live feed is already being
+   * The report carries a drone *count* per cell, taken when the forecast ran - which can be half
+   * a minute old, and never said which aircraft anyway. The live feed is already being
    * polled for the rest of the dashboard, so the panel names them off that instead: a count that
    * disagrees with the roster is worse than no count, and "two on station" is a different
    * situation from "two surveyors on station and no suppression".
@@ -202,12 +202,12 @@ export default function RiskMap({ active, onOpenDroneFeed }: {
     }
   }, []);
 
-  // Predict when the tab is opened, then keep it fresh while it is being watched. The model is a
-  // 235B and the fire front does not move in seconds, so this is deliberately slow.
+  // Predict when the tab is opened, then keep it fresh while it is being watched. The fire front
+  // does not move in seconds, so this is deliberately unhurried.
   useEffect(() => {
     if (!active) return;
     void predict();
-    const timer = setInterval(() => void predict(), 90_000);
+    const timer = setInterval(() => void predict(), 30_000);
     return () => {
       clearInterval(timer);
       abortRef.current?.abort();
@@ -553,9 +553,9 @@ export default function RiskMap({ active, onOpenDroneFeed }: {
         {report && (
           <div className={styles.provenance}>
             <span
-              className={`${styles.sourceBadge} ${report.source === "ai" ? styles.sourceAi : styles.sourceBaseline}`}
+              className={`${styles.sourceBadge} ${report.source === "forecast" ? styles.sourceAi : styles.sourceBaseline}`}
             >
-              {report.source === "ai" ? "AI forecast" : "Baseline"}
+              {report.source === "forecast" ? "Spread forecast" : "No feed"}
             </span>
             <span className={styles.provenanceMeta}>
               {report.observed.fires} burning · {report.observed.drones} drones
@@ -564,7 +564,7 @@ export default function RiskMap({ active, onOpenDroneFeed }: {
           </div>
         )}
 
-        {/* The model's read, and - when it could not be reached - why not. */}
+        {/* The forecast's read, and - when there was nothing to read - why not. */}
         {report?.briefing && (
           <div className={styles.briefing}>
             <p className={styles.briefingBody}>{report.briefing}</p>
@@ -573,7 +573,7 @@ export default function RiskMap({ active, onOpenDroneFeed }: {
         )}
         {report?.error && (
           <p className={styles.fallbackNote}>
-            Model unavailable, showing live-fire arithmetic. {report.error}
+            No forecast this run. {report.error}
           </p>
         )}
 
@@ -591,9 +591,10 @@ export default function RiskMap({ active, onOpenDroneFeed }: {
         <div className={styles.legendInfo}>
           <p className={styles.legendInfoTitle}>How risk is calculated</p>
           <p className={styles.legendInfoBody}>
-            Live burning columns, the disaster log and drone positions are binned onto
-            the grid, then read by a model that projects where the front moves next.
-            If it cannot be reached, the map falls back to fire density alone.
+            Live burning columns and the disaster log are binned onto the grid, then
+            pushed downwind into a burn envelope for the next ten minutes. Small
+            pockets ahead of the front are projected ember cast - where the wind is
+            expected to drop embers and start the next fire.
           </p>
         </div>
 

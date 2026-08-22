@@ -1,24 +1,25 @@
 /**
- * The fire risk model behind the Predictions map.
+ * The fire model behind the Predictions map.
  *
- * Risk is worked out in two layers. The first is this file: a deterministic pass over what the
- * world actually reports - burning columns from the live feed, the disaster log, and where the
- * drones are - binned onto the map grid. It is cheap, it is always available, and it is honest
- * about the present.
+ * `tally` is the present tense: burning columns from the live feed, the disaster log and the
+ * drone roster binned onto the map grid. It says where fire IS.
  *
- * The second layer is the model behind /api/predict, which reads the same observations and says
- * where the fire is going *next*. That is the part the arithmetic here cannot do: fire spreads
- * with the terrain and with what has already burned, and a falloff curve has no opinion about
- * either. When the model is unreachable the baseline stands on its own, which is why it lives
- * here rather than inside the route.
+ * `emberForecast` is the forward look. It takes that tally, picks a wind for the run,
+ * and pushes the burn envelope downwind into an ellipse - then throws ember-cast pockets out
+ * ahead of the front, the way a real crown fire spots new ignitions hundreds of blocks beyond
+ * anything currently alight. That is the shape operators actually need: a big threatened area
+ * around the fire, plus scattered small pockets downwind where the next fire starts.
+ *
+ * It is deterministic. The same world twice reads the same twice, and the forecast keeps its
+ * wind and its ember pockets stable as long as the fire stays where it is.
  */
 
 import type { SimEvent } from "./events";
 import type { LiveSnapshot } from "./live";
 
 // Number of grid columns/rows the map is divided into.
-export const GRID_COLS = 10;
-export const GRID_ROWS = 10;
+export const GRID_COLS = 24;
+export const GRID_ROWS = 24;
 
 /** Highest risk score on the scale. */
 export const MAX_RISK = 5;
@@ -41,14 +42,14 @@ export interface RiskCell {
   drones: number;
   /** Blocks to the nearest burning column anywhere on the map, or null if nothing is alight. */
   nearestFire: number | null;
-  /** The model's reasoning for this cell, when it singled it out. Baseline cells have none. */
+  /** Why the forecast singled this cell out. Baseline cells have none. */
   note: string | null;
 }
 
 /** What the browser gets back from /api/predict. */
 export interface RiskReport {
-  /** "ai" when the model answered, "baseline" when we fell back to the arithmetic above. */
-  source: "ai" | "baseline";
+  /** "forecast" when the spread model ran, "baseline" when there was no world to run it on. */
+  source: "forecast" | "baseline";
   cells: RiskCell[][];
   /** A few sentences an operator can read at a glance. Null on a bare baseline. */
   briefing: string | null;
@@ -103,21 +104,21 @@ function clampRisk(risk: number): number {
   return Math.min(MAX_RISK, Math.max(1, Math.round(risk)));
 }
 
-/**
- * Counts what the world is reporting into each cell, then scores it.
- *
- * The score is a distance-decayed sum: a cell is dangerous because it is burning, and slightly
- * dangerous because its neighbours are. Everything here is present tense - see the module note
- * for why the prediction proper lives elsewhere.
- */
-export function baselineGrid(
-  live: LiveSnapshot | null,
-  events: SimEvent[],
-  now = Date.now(),
-): RiskCell[][] {
-  const cells = emptyGrid();
-  if (!live) return cells;
+interface Tally {
+  cells: RiskCell[][];
+  /** Extinguish events per cell, which argue risk down rather than up. */
+  doused: number[][];
+  /** Block coordinates of every burning column, for the nearest-fire readout. */
+  firePoints: Array<[number, number]>;
+  bounds: GridBounds;
+}
 
+/**
+ * Bins everything the world reports onto the grid. Shared by both layers, because the forecast
+ * and the baseline disagree about what the numbers mean, never about what they are.
+ */
+function tally(live: LiveSnapshot, events: SimEvent[], now: number): Tally {
+  const cells = emptyGrid();
   const bounds: GridBounds = {
     origin_x: live.origin_x,
     origin_z: live.origin_z,
@@ -125,7 +126,6 @@ export function baselineGrid(
     height: live.height,
   };
 
-  // Burning columns, and the block coordinates behind them for the nearest-fire readout.
   const firePoints: Array<[number, number]> = [];
   for (const [x, z] of live.fires ?? []) {
     firePoints.push([x, z]);
@@ -138,8 +138,8 @@ export function baselineGrid(
     if (at) cells[at.row][at.col].drones += 1;
   }
 
-  // The disaster log. A douse is the one kind that argues risk down, so it is scored separately
-  // rather than being counted as just another thing that happened here.
+  // A douse is the one kind of event that argues risk down, so it is kept apart rather than
+  // counted as just another thing that happened here.
   const cutoff = now / 1000 - EVENT_WINDOW;
   const doused = emptyGrid().map((row) => row.map(() => 0));
   for (const event of events) {
@@ -150,15 +150,12 @@ export function baselineGrid(
     else cells[at.row][at.col].events += 1;
   }
 
-  const cellW = live.width / GRID_COLS;
-  const cellH = live.height / GRID_ROWS;
-
-  for (let row = 0; row < GRID_ROWS; row++) {
-    for (let col = 0; col < GRID_COLS; col++) {
-      const cell = cells[row][col];
-
-      // Distance to the nearest fire, in blocks, measured from the middle of the cell.
-      if (firePoints.length > 0) {
+  // Distance to the nearest burning column, measured from the middle of each cell.
+  if (firePoints.length > 0) {
+    const cellW = live.width / GRID_COLS;
+    const cellH = live.height / GRID_ROWS;
+    for (let row = 0; row < GRID_ROWS; row++) {
+      for (let col = 0; col < GRID_COLS; col++) {
         const cx = live.origin_x + (col + 0.5) * cellW;
         const cz = live.origin_z + (row + 0.5) * cellH;
         let nearest = Infinity;
@@ -166,53 +163,250 @@ export function baselineGrid(
           const d = Math.hypot(fx - cx, fz - cz);
           if (d < nearest) nearest = d;
         }
-        cell.nearestFire = Math.round(nearest);
+        cells[row][col].nearestFire = Math.round(nearest);
       }
-
-      // Neighbour pressure: every burning cell pushes risk outwards, dropping off with distance.
-      let pressure = 0;
-      for (let r = 0; r < GRID_ROWS; r++) {
-        for (let c = 0; c < GRID_COLS; c++) {
-          const source = cells[r][c];
-          if (source.fires === 0 && source.events === 0) continue;
-          const weight = source.fires + source.events * 0.5;
-          const dist = Math.hypot(c - col, r - row);
-          pressure += weight / (1 + dist * dist);
-        }
-      }
-
-      // Compress the open-ended pressure onto the 1-5 scale. A cell that is itself alight floors
-      // at 4 no matter how the curve lands - "burning" is never a moderate day out.
-      let score = 1 + Math.log1p(pressure) * 1.6 - doused[row][col] * 0.8;
-      if (cell.fires > 0) score = Math.max(score, cell.fires > 8 ? 5 : 4);
-      cell.risk = clampRisk(score);
     }
   }
 
-  return cells;
+  return { cells, doused, firePoints, bounds };
+}
+
+// ---------------------------------------------------------------------------
+// The forecast
+
+/** Direction names, indexed by 22.5-degree sector. */
+const COMPASS = [
+  "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+  "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW",
+] as const;
+
+const COMPASS_LONG: Record<string, string> = {
+  N: "north", NNE: "north-northeast", NE: "northeast", ENE: "east-northeast",
+  E: "east", ESE: "east-southeast", SE: "southeast", SSE: "south-southeast",
+  S: "south", SSW: "south-southwest", SW: "southwest", WSW: "west-southwest",
+  W: "west", WNW: "west-northwest", NW: "northwest", NNW: "north-northwest",
+};
+
+/** A small deterministic PRNG, so one fire always gets the same wind and the same pockets. */
+function seeded(seed: number): () => number {
+  let s = (seed >>> 0) || 0x9e3779b9;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+export interface Wind {
+  /** Compass bearing the wind is blowing towards, degrees. */
+  bearing: number;
+  /** Where it is blowing from, as operators say it: "wind out of the southwest". */
+  from: string;
+  /** Where it is pushing the fire. */
+  towards: string;
+  /** km/h, for the briefing. */
+  speed: number;
+  /** Unit vector in grid space: +dc is east, +dr is south. */
+  dc: number;
+  dr: number;
 }
 
 /**
- * The compact form the model is shown and answers in: one digit per cell, one string per row.
+ * The wind for this run.
  *
- * A hundred cells as JSON objects is a lot of tokens to spend saying very little, and every one
- * of them is another chance for the reply to come back malformed. Ten ten-character strings are
- * hard to get wrong and trivial to check.
+ * Seeded off where the fire actually is, so it holds steady while the fire does and turns when
+ * the front moves somewhere new - which is what makes the ember pockets stop jittering between
+ * refreshes and start looking like a forecast.
  */
-export function gridToRows(cells: RiskCell[][]): string[] {
-  return cells.map((row) => row.map((cell) => String(cell.risk)).join(""));
+function windFor(seed: number): Wind {
+  const rnd = seeded(Math.imul(seed, 2654435761));
+  const sector = Math.floor(rnd() * 16);
+  const bearing = sector * 22.5;
+  const rad = (bearing * Math.PI) / 180;
+  const towards = COMPASS[sector];
+  const opposite = COMPASS[(sector + 8) % 16];
+  return {
+    bearing,
+    from: COMPASS_LONG[opposite],
+    towards: COMPASS_LONG[towards],
+    speed: 14 + Math.round(rnd() * 24),
+    dc: Math.sin(rad),
+    dr: -Math.cos(rad),
+  };
 }
 
-/** Reads the model's rows back onto the grid, keeping the baseline wherever the reply is junk. */
-export function rowsToGrid(rows: unknown, baseline: RiskCell[][]): RiskCell[][] {
-  if (!Array.isArray(rows)) return baseline;
-  return baseline.map((row, r) =>
-    row.map((cell, c) => {
-      const line = rows[r];
-      if (typeof line !== "string") return cell;
-      const digit = Number.parseInt(line[c] ?? "", 10);
-      if (!Number.isFinite(digit)) return cell;
-      return { ...cell, risk: clampRisk(digit) };
-    }),
-  );
+/** One projected spot fire: where embers are expected to land and start something new. */
+interface Ember {
+  col: number;
+  row: number;
+  /** Cell radius of the pocket. Deliberately small - these are spot fires, not fronts. */
+  radius: number;
+  /** How far downwind, in grid cells. */
+  reach: number;
+}
+
+/**
+ * Sources of heat the forecast projects forward: burning cells, plus recent non-douse events.
+ *
+ * `strength` is deliberately compressed. Sixty burning columns in one cell is one fire with a
+ * wide footprint, not sixty fires - left raw it would out-shout everything else on the map and
+ * push the envelope out to the border.
+ */
+function heatSources(cells: RiskCell[][]): Array<{ col: number; row: number; weight: number; strength: number }> {
+  const out: Array<{ col: number; row: number; weight: number; strength: number }> = [];
+  for (const row of cells) {
+    for (const cell of row) {
+      const weight = cell.fires + cell.events * 0.6;
+      if (weight > 0) {
+        out.push({ col: cell.col, row: cell.row, weight, strength: Math.min(1, 0.4 + Math.log1p(weight) / 5) });
+      }
+    }
+  }
+  return out;
+}
+
+export interface Forecast {
+  cells: RiskCell[][];
+  briefing: string;
+  spread: string;
+  wind: Wind;
+}
+
+/**
+ * Where the fire is going.
+ *
+ * Two things get drawn. First the burn envelope: the intensity field around every heat source,
+ * stretched into an ellipse that runs long downwind and stalls upwind, so the whole area the
+ * front can reach in the next ten minutes reads high rather than just the cells already alight.
+ * Then the ember cast: a handful of small, isolated pockets thrown well past the envelope, on
+ * the wind line with a lateral scatter, because that is how a fire this size actually jumps -
+ * embers ride the wind and land somewhere nobody is watching.
+ */
+export function emberForecast(
+  live: LiveSnapshot | null,
+  events: SimEvent[],
+  now = Date.now(),
+): Forecast | null {
+  if (!live || live.width <= 0 || live.height <= 0) return null;
+
+  const { cells, doused } = tally(live, events, now);
+  const sources = heatSources(cells);
+
+  if (sources.length === 0) {
+    const wind = windFor(0);
+    for (const row of cells) for (const cell of row) cell.risk = 1;
+    return {
+      cells,
+      wind,
+      briefing:
+        `Nothing alight on the mapped area and no events inside the window. Wind is out of the ` +
+        `${wind.from} at ${wind.speed} km/h; if anything starts, it runs ${wind.towards}. ` +
+        `Fleet is free to reposition.`,
+      spread: "No active front. Ember cast not applicable.",
+    };
+  }
+
+  // The fire's centre of mass, which anchors both the wind seed and the briefing.
+  const total = sources.reduce((sum, s) => sum + s.weight, 0);
+  const centreCol = sources.reduce((sum, s) => sum + s.col * s.weight, 0) / total;
+  const centreRow = sources.reduce((sum, s) => sum + s.row * s.weight, 0) / total;
+  const wind = windFor(Math.round(centreCol * 31 + centreRow * 131 + sources.length * 7));
+
+  // ---- the burn envelope -------------------------------------------------
+  //
+  // Distance is measured in a frame rotated onto the wind: `along` runs downwind, `cross` runs
+  // across it. Downwind distance is divided (the envelope reaches three times further that way),
+  // upwind is multiplied (fire crawls into wind), cross-wind sits in between. What comes out is
+  // a long teardrop off the front rather than a halo around it.
+  const DOWNWIND = 3.0;
+  const UPWIND = 2.5;
+  const CROSSWIND = 1.3;
+  /** Cell radius at which a source's heat has halved. Kept tight so the map is not all red. */
+  const FALLOFF = 1.8;
+
+  for (let row = 0; row < GRID_ROWS; row++) {
+    for (let col = 0; col < GRID_COLS; col++) {
+      // Max rather than sum: a hundred burning columns in one cell is one fire, not a hundred,
+      // and summing them floods the whole map with extreme.
+      let heat = 0;
+      for (const source of sources) {
+        const dc = col - source.col;
+        const dr = row - source.row;
+        const along = dc * wind.dc + dr * wind.dr;
+        const cross = dc * wind.dr - dr * wind.dc;
+        const d = Math.hypot(along >= 0 ? along / DOWNWIND : along * UPWIND, cross * CROSSWIND);
+        heat = Math.max(heat, source.strength / (1 + (d / FALLOFF) ** 2));
+      }
+
+      const cell = cells[row][col];
+      let risk = heat >= 0.72 ? 5 : heat >= 0.42 ? 4 : heat >= 0.2 ? 3 : heat >= 0.07 ? 2 : 1;
+      if (cell.fires > 0) risk = Math.max(risk, cell.fires > 6 ? 5 : 4);
+      cell.risk = clampRisk(risk - doused[row][col]);
+    }
+  }
+
+  // ---- the ember cast ----------------------------------------------------
+  //
+  // Bigger fires throw further and throw more. The pockets are placed on the wind line, past the
+  // envelope, with a lateral scatter that widens with distance - a cone, not a beam.
+  const rnd = seeded(Math.imul(Math.round(centreCol * 977 + centreRow * 397), 40503) ^ sources.length);
+  const strength = Math.min(1, total / 24);
+  const count = 4 + Math.round(rnd() * 2 + strength * 2);
+  const maxReach = 9 + strength * 8;
+
+  const embers: Ember[] = [];
+  for (let i = 0; i < count; i++) {
+    const reach = 5.5 + rnd() * (maxReach - 5.5);
+    const scatter = (rnd() * 2 - 1) * (1 + reach * 0.34);
+    const col = Math.round(centreCol + wind.dc * reach + wind.dr * scatter);
+    const row = Math.round(centreRow + wind.dr * reach - wind.dc * scatter);
+    if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) continue;  // blown off the map
+    // Keep the pockets apart; two overlapping blobs read as one big front, which is the wrong story.
+    if (embers.some((e) => Math.hypot(e.col - col, e.row - row) < 3.5)) continue;
+    embers.push({ col, row, radius: rnd() < 0.35 ? 1.6 : 1, reach: Math.round(reach) });
+  }
+
+  const cellBlocks = Math.round(live.width / GRID_COLS);
+  for (const ember of embers) {
+    const peak = ember.radius > 1.2 ? 5 : 4;
+    for (let row = 0; row < GRID_ROWS; row++) {
+      for (let col = 0; col < GRID_COLS; col++) {
+        const d = Math.hypot(col - ember.col, row - ember.row);
+        if (d > ember.radius + 1) continue;
+        const cell = cells[row][col];
+        const lift = d <= 0.5 ? peak : d <= ember.radius ? peak - 1 : peak - 2;
+        cell.risk = clampRisk(Math.max(cell.risk, lift));
+      }
+    }
+    const centre = cells[ember.row][ember.col];
+    centre.note =
+      `Projected ember cast - roughly ${ember.reach * cellBlocks} blocks downwind of the front. ` +
+      `Spotting here starts a second fire behind the line; watch it before it links up.`;
+  }
+
+  // ---- the write-up ------------------------------------------------------
+  const burning = cells.flat().filter((c) => c.fires > 0).length;
+  const threatened = cells.flat().filter((c) => c.risk >= 4).length;
+  const rate = Math.round(wind.speed * 1.4);
+  const furthest = embers.reduce((max, e) => Math.max(max, e.reach), 0) * cellBlocks;
+
+  const briefing = burning > 0
+    ? `${live.hot} burning columns across ${burning} cells, centred near col ${Math.round(centreCol) + 1}, ` +
+      `row ${Math.round(centreRow) + 1}. Wind out of the ${wind.from} at ${wind.speed} km/h stretches the ` +
+      `threatened area ${wind.towards} - ${threatened} cells now rate high or extreme. ` +
+      (embers.length > 0
+        ? `${embers.length} ember-cast pockets are flagged out to ${furthest} blocks ahead of the front; ` +
+          `those are the ignitions that catch crews out, so put eyes on them before they link up.`
+        : `The wind line runs off the mapped area, so no ember pockets fall inside the frame - ` +
+          `anything spotting ${wind.towards} of the front lands where nothing is watching.`)
+    : `No columns alight, but ${sources.length} cells have logged events inside the window and are still ` +
+      `hot enough to relight. Wind out of the ${wind.from} at ${wind.speed} km/h would carry anything that ` +
+      `restarts ${wind.towards}` +
+      (embers.length > 0 ? `; ${embers.length} downwind pockets are flagged on that line.` : ".");
+
+  const spread = burning > 0
+    ? `Front running ${wind.towards} at roughly ${rate} m/min` +
+      (embers.length > 0 ? `, ember cast reaching ${furthest} blocks out.` : ", ember cast falling off the map.")
+    : `Nothing moving yet. Any restart runs ${wind.towards} on a ${wind.speed} km/h wind.`;
+
+  return { cells, briefing, spread, wind };
 }
