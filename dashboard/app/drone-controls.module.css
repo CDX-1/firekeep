@@ -1,0 +1,36 @@
+.controls { display: flex; align-items: center; gap: clamp(12px, 2vw, 22px); padding: 10px 11px; background: var(--bg); border-top: 1px solid var(--line); }
+
+.pad { display: grid; grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); gap: 3px; flex: 0 0 auto; }
+.up { grid-area: 1 / 2; }
+.left { grid-area: 2 / 1; }
+.hold { grid-area: 2 / 2; }
+.right { grid-area: 2 / 3; }
+.down { grid-area: 3 / 2; }
+
+.controls button { display: grid; place-items: center; padding: 0; color: var(--muted); background: rgba(255, 255, 255, .05); border: 0; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 5px; font: inherit; font-size: 10px; cursor: pointer; transition: color 100ms ease, background-color 100ms ease, outline-color 100ms ease; }
+.controls button:hover { color: var(--text); background: rgba(255, 255, 255, .1); outline-color: rgba(143, 184, 174, .5); }
+.controls button:active { background: var(--accent-soft); }
+.controls button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
+.controls svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+.hold { font-size: 9px; letter-spacing: .02em; }
+
+.altitude { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; }
+.altitude button { flex-direction: row; gap: 6px; justify-content: flex-start; height: 30px; padding: 0 9px; }
+.altitude svg { width: 13px; height: 13px; }
+
+.settings { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.stepLabel { margin: 0; color: var(--muted); font-size: 10px; letter-spacing: .02em; }
+.steps { display: flex; gap: 3px; }
+.steps button { width: 30px; height: 22px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.steps button[data-active="true"] { color: #cae0da; background: var(--accent-soft); outline-color: transparent; }
+
+.status { margin: 0; overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.status[data-error="true"] { color: var(--warm); }
+
+@media (max-width: 720px) {
+  .controls { flex-wrap: wrap; gap: 12px; }
+  .settings { flex-basis: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) { .controls button { transition: none; } }

@@ -1,11 +1,16 @@
 import styles from "./icons.module.css";
 
-/** The placeholder that stands in until a feed actually sends a frame. */
-export function EmptyImage({ ratio = false }: { ratio?: boolean }) {
+/**
+ * The placeholder that stands in until a feed actually sends a frame.
+ *
+ * `label` is worth setting whenever the reason is known - "connecting" and "nothing there"
+ * look identical to an operator otherwise.
+ */
+export function EmptyImage({ ratio = false, label = "No image received" }: { ratio?: boolean; label?: string }) {
   return (
     <span className={styles.emptyImage} data-ratio={ratio}>
       <ImageIcon />
-      <span>No image received</span>
+      <span>{label}</span>
     </span>
   );
 }

@@ -5,18 +5,13 @@ const BASE = "/camera";
 
 /** How often the roster is re-read, so a drone that just took off shows up on its own. */
 export const ROSTER_INTERVAL_MS = 1000;
-/** Fallback rate for tiles that could not get a live stream; see MAX_LIVE_TILES. */
-export const TILE_INTERVAL_MS = 250;
-
 /**
- * How many grid tiles get a real MJPEG stream.
+ * How long a grid tile waits after painting before asking for another frame.
  *
- * <p>Browsers allow six concurrent connections to one origin, and every open stream holds one for
- * as long as it is on screen. Four leaves room for the roster poll and for the expanded viewer's
- * own stream; tiles past that fall back to polling single frames, which is choppy but does not
- * starve the rest of the page.
+ * This is a courtesy gap, not the real limit: how fast tiles actually refresh is set by the
+ * shared queue in lib/frames, which is what keeps a wall of them from starving each other.
  */
-export const MAX_LIVE_TILES = 4;
+export const TILE_INTERVAL_MS = 150;
 
 /** The live roster. Throws if the Minecraft client is not running. */
 export async function getDrones(signal?: AbortSignal): Promise<DroneCamera[]> {

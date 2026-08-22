@@ -1,19 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import styles from "./live-monitoring.module.css";
 import { AREAS, type Area, type Filter } from "./drones";
 import { CameraIcon, Chevron, EmptyImage } from "./icons";
-import {
-  MAX_LIVE_TILES,
-  ROSTER_INTERVAL_MS,
-  TILE_INTERVAL_MS,
-  areaOf,
-  getDrones,
-  snapshotUrl,
-  streamUrl,
-} from "@/lib/cameras";
+import DroneControls from "./drone-controls";
+import { ROSTER_INTERVAL_MS, TILE_INTERVAL_MS, areaOf, getDrones, streamUrl } from "@/lib/cameras";
+import { fetchFrame, pauseFrames } from "@/lib/frames";
 import type { DroneCamera } from "@/lib/types";
+
+/** How long to wait before retrying a frame the agent could not give us yet. */
+const FRAME_RETRY_MS = 600;
 
 type Drone = DroneCamera & { area: Area };
 
@@ -51,6 +48,13 @@ export default function LiveMonitoring() {
   useEffect(() => {
     if (focusedId && !focusedDrone) setFocusedId(null);
   }, [focusedId, focusedDrone]);
+
+  // The grid is behind a full-screen overlay while the viewer is open, so it has nothing to
+  // show and no business holding connections the viewer's stream needs.
+  useEffect(() => {
+    pauseFrames(selectedId !== null);
+    return () => pauseFrames(false);
+  }, [selectedId]);
 
   useEffect(() => {
     if (!selectedDrone) return;
@@ -103,12 +107,18 @@ export default function LiveMonitoring() {
         </aside>
 
         <section className={styles.grid} data-focused={Boolean(focusedDrone)} data-count={visibleDrones.length} aria-label="Drone camera feeds">
-          {visibleDrones.map((drone, index) => (
+          {visibleDrones.map((drone) => (
             <article className={styles.feed} key={drone.id}>
               <button className={styles.viewport} type="button" aria-label={`Open ${drone.id} feed`} onClick={() => setSelectedId(drone.id)}>
-                <TileFeed id={drone.id} live={index < MAX_LIVE_TILES && selectedId === null} />
+                <TileFeed id={drone.id} active={selectedId === null} />
                 <span className={styles.feedLabel}>{drone.id}</span>
               </button>
+              {/* Singled out from the sidebar and not expanded: this is the drone being watched,
+                  so it gets the controls. The overlay owns them once it is open, so only ever
+                  one panel is listening for the keys. */}
+              {focusedDrone?.id === drone.id && selectedId === null && (
+                <div className={styles.tileControls}><DroneControls drone={drone} /></div>
+              )}
             </article>
           ))}
           {visibleDrones.length === 0 && (
@@ -134,6 +144,7 @@ export default function LiveMonitoring() {
             <div className={styles.viewerPanel} key={selectedDrone.id}>
               <div className={styles.viewerImage}><LiveFeed id={selectedDrone.id} /></div>
               <p>{selectedDrone.id} - {Math.round(selectedDrone.x)}, {Math.round(selectedDrone.y)}, {Math.round(selectedDrone.z)}</p>
+              <DroneControls drone={selectedDrone} />
             </div>
             {visibleDrones.length > 1 && <button className={styles.viewerArrow} type="button" aria-label="Next drone feed" onClick={() => moveViewer(1)}>
               <Chevron direction="right" />
@@ -180,54 +191,86 @@ function useDroneRoster() {
 }
 
 /**
- * A grid tile.
+ * The newest frame for one drone, refreshed while `active`.
  *
- * <p>The first few tiles get a real MJPEG stream and move as fast as the agent renders. The rest
- * poll single frames, because a browser only allows six connections to one origin and the roster
- * poll and the expanded viewer need some of those. Tiles give up their stream entirely while the
- * expanded viewer is open, so the drone somebody is actually looking at gets the connection.
+ * <p>Frames are fetched through the shared queue in lib/frames rather than by the tile itself,
+ * so a wall of them takes turns instead of racing for the browser's handful of connections to
+ * this origin. The last frame is kept when a tile goes quiet, so nothing blanks out.
  */
-function TileFeed({ id, live }: { id: string; live: boolean }) {
-  const [tick, setTick] = useState(0);
-  const [hasFrame, setHasFrame] = useState(false);
-  const image = useRef<HTMLImageElement>(null);
+function useDroneFrame(id: string, active: boolean, priority = false) {
+  const [src, setSrc] = useState<string | null>(null);
+  const shown = useRef<string | null>(null);
+
+  const show = useCallback((next: string | null) => {
+    const previous = shown.current;
+    shown.current = next;
+    setSrc(next);
+    // The old frame is still on screen until the new one decodes, so let it go a moment later.
+    if (previous) window.setTimeout(() => URL.revokeObjectURL(previous), 2_000);
+  }, []);
+
+  // A different drone starts blank rather than showing the last one's picture.
+  useEffect(() => {
+    show(null);
+    return () => {
+      if (shown.current) URL.revokeObjectURL(shown.current);
+      shown.current = null;
+    };
+  }, [id, show]);
 
   useEffect(() => {
-    setHasFrame(false);
-  }, [id, live]);
+    if (!active) return;
+    const controller = new AbortController();
+    let stopped = false;
 
-  useEffect(() => {
-    if (live) {
-      // Dropping the src is what actually closes the connection when this tile stops streaming.
-      const element = image.current;
-      return () => element?.setAttribute("src", "");
-    }
-    const timer = setInterval(() => setTick((value) => value + 1), TILE_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [id, live]);
+    const run = async () => {
+      while (!stopped) {
+        try {
+          const blob = await fetchFrame(id, controller.signal, priority);
+          if (stopped) return;
+          show(URL.createObjectURL(blob));
+          await wait(TILE_INTERVAL_MS, controller.signal);
+        } catch {
+          if (stopped) return;
+          // 503 while the agent renders this drone's first frame, or an agent restarting.
+          await wait(FRAME_RETRY_MS, controller.signal).catch(() => undefined);
+        }
+      }
+    };
 
-  return (
-    <>
-      {!hasFrame && <EmptyImage ratio />}
-      <img
-        ref={image}
-        className={styles.feedImage}
-        style={hasFrame ? undefined : { display: "none" }}
-        src={live ? streamUrl(id) : snapshotUrl(id, tick)}
-        alt={`${id} camera`}
-        onLoad={() => setHasFrame(true)}
-      />
-    </>
-  );
+    void run();
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [id, active, priority, show]);
+
+  return src;
 }
 
-/** The expanded viewer: one long-lived MJPEG response, decoded by the browser as it arrives. */
+/** A grid tile: stills, taken in turn with every other tile. */
+function TileFeed({ id, active }: { id: string; active: boolean }) {
+  const src = useDroneFrame(id, active);
+
+  if (!src) return <EmptyImage ratio label="Waiting for the first frame" />;
+  return <img className={styles.feedImage} src={src} alt={`${id} camera`} />;
+}
+
+/**
+ * The expanded viewer: one long-lived MJPEG response, decoded by the browser as it arrives.
+ *
+ * <p>A stream takes a moment to open, so a still is fetched alongside it and shown first. That
+ * is what stops the drone you just opened from sitting behind "no image" while it connects.
+ * Once the stream delivers a frame it takes over and the stills stop.
+ */
 function LiveFeed({ id }: { id: string }) {
+  const [streaming, setStreaming] = useState(false);
+  // Priority: this is the drone being watched, so its still never queues behind the grid.
+  const snapshot = useDroneFrame(id, !streaming, true);
   const image = useRef<HTMLImageElement>(null);
-  const [hasFrame, setHasFrame] = useState(false);
 
   useEffect(() => {
-    setHasFrame(false);
+    setStreaming(false);
     const element = image.current;
     // Dropping the src is what actually closes the connection when the viewer moves on.
     return () => element?.setAttribute("src", "");
@@ -235,15 +278,33 @@ function LiveFeed({ id }: { id: string }) {
 
   return (
     <>
-      {!hasFrame && <EmptyImage />}
+      {!streaming && (snapshot
+        ? <img className={styles.feedImage} src={snapshot} alt={`${id} camera`} />
+        : <EmptyImage label="Connecting to the feed" />)}
       <img
         ref={image}
         className={styles.feedImage}
-        style={hasFrame ? undefined : { display: "none" }}
+        style={streaming ? undefined : { display: "none" }}
         src={streamUrl(id)}
         alt={`${id} camera`}
-        onLoad={() => setHasFrame(true)}
+        onLoad={() => setStreaming(true)}
       />
     </>
   );
+}
+
+/** A cancellable sleep, so a tile that goes away stops waiting rather than finishing its nap. */
+function wait(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) return reject(new DOMException("aborted", "AbortError"));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }

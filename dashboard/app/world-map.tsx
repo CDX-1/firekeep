@@ -538,8 +538,10 @@ function syncMarkers(markers: Marker[], live: LiveDrone[], dt: number) {
 
   for (const drone of live) {
     const area = areaOf(drone);
-    // the mod reports degrees, with 0 facing south; the marker is drawn nose-up
-    const yaw = (drone.yaw - 90) * Math.PI / 180;
+    // Minecraft yaw is degrees with 0 facing +Z, so forward is (-sin, cos). drawDrone turns the
+    // marker by yaw + 90 degrees and its nose starts pointing screen-up, which lands the nose on
+    // that forward vector only with +90 here - with -90 every drone was drawn facing backwards.
+    const yaw = (drone.yaw + 90) * Math.PI / 180;
     const target = drone.target ? { x: drone.target[0], z: drone.target[2] } : null;
 
     const marker = existing.get(drone.id);
