@@ -1,0 +1,248 @@
+/*
+ * The instrument layer.
+ *
+ * Sized in container units rather than viewport ones: the same component is drawn over a
+ * thumbnail a fifth of a screen wide and over a picture that fills it, and the readouts have to
+ * stay legible in both without being separately written for both. `cqw` is a percentage of this
+ * overlay's own width, so a strip on a small tile is a small strip rather than a broken one -
+ * with clamps at each end so it never becomes unreadable or comical.
+ *
+ * Every colour that identifies the aircraft comes through --role, which the component sets from
+ * the role registry. Nothing here knows what a surveyor is.
+ */
+
+.hud {
+  container-type: inline-size;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  color: #e7ede7;
+  font-family: "IBM Plex Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* A feed that has stopped arriving should look like one, not like a still life. */
+.hud[data-stale="true"] { filter: saturate(.45); }
+.hud[data-stale="true"] .geometry { opacity: .5; }
+
+/* --------------------------------------------------------------- picture treatment */
+
+/*
+ * Infrared, faked honestly.
+ *
+ * There is one camera on the drone and it is a colour one, so a thermal ship cannot be handed a
+ * real IR image. What it gets is the colour image run through an ironbow-ish transfer curve in
+ * the compositor - crushed to luminance, then pushed to the orange end and hardened. It is a
+ * false-colour rendering of brightness rather than of heat, and it says SIM SENSOR SUITE along
+ * the bottom of the frame for exactly that reason.
+ */
+.thermalPalette {
+  position: absolute;
+  inset: 0;
+  backdrop-filter: grayscale(1) contrast(1.45) brightness(.92) sepia(1) hue-rotate(-28deg) saturate(4.2);
+  -webkit-backdrop-filter: grayscale(1) contrast(1.45) brightness(.92) sepia(1) hue-rotate(-28deg) saturate(4.2);
+}
+
+/* Scan lines and a vignette: the difference between a video feed and a photograph. */
+.grain {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, .16) 0 1px,
+    transparent 1px 3px
+  );
+  box-shadow: inset 0 0 clamp(40px, 12cqw, 130px) rgba(3, 6, 4, .55);
+  opacity: .55;
+}
+
+/* ------------------------------------------------------------------- geometry */
+
+.geometry {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.geometry text {
+  fill: var(--role);
+  font-family: inherit;
+  letter-spacing: .05em;
+  paint-order: stroke;
+  stroke: rgba(4, 7, 5, .8);
+  stroke-width: 3.5;
+  stroke-linejoin: round;
+}
+
+.svgTag { fill: var(--role); }
+.svgTagDim { fill: rgba(226, 233, 226, .62); }
+.svgLabel { fill: rgba(226, 233, 226, .78); }
+
+.bracket { fill: none; stroke: var(--role); opacity: .85; }
+.horizon { fill: none; stroke: rgba(226, 233, 226, .5); }
+.compass { fill: none; stroke: rgba(226, 233, 226, .55); }
+.compassCaret { fill: var(--role); stroke: var(--role); }
+.reticle { fill: none; stroke: var(--role); opacity: .9; }
+.reticleFill { fill: var(--role); }
+
+.groundGrid { fill: none; stroke: rgba(var(--role-rgb), .3); }
+
+/* The bar the surveyor's mapping pass runs down the frame. */
+.sweep { fill: rgba(var(--role-rgb), .5); animation: sweep 4.6s linear infinite; }
+
+/* A box round something the sensor has actually found. */
+.track { fill: none; stroke: var(--role); }
+.track path { fill: none; stroke: var(--role); }
+.track[data-tone="hot"] path { stroke: #ffb800; }
+.track[data-tone="hot"] .svgTag { fill: #ffb800; }
+
+.isotherm circle { fill: none; stroke: #ffb347; }
+.isotherm { animation: breathe 3.4s ease-in-out infinite; }
+
+.corridor { fill: none; stroke: var(--role); opacity: .8; stroke-dasharray: 14 10; }
+
+.mesh path { fill: none; stroke: var(--role); opacity: .75; }
+.mesh circle { fill: rgba(8, 12, 10, .6); stroke: var(--role); }
+.mesh g[data-weak="true"] path, .mesh g[data-weak="true"] circle { stroke: #d98c5a; }
+
+.sweepRing circle { fill: none; stroke: var(--role); transform-origin: center; animation: ping 2.8s ease-out infinite; }
+.contact rect { fill: rgba(var(--role-rgb), .12); stroke: var(--role); stroke-dasharray: 7 6; }
+.contact[data-strong="true"] rect { fill: rgba(var(--role-rgb), .24); stroke-dasharray: none; }
+
+@keyframes sweep { from { transform: translateY(0); } to { transform: translateY(912px); } }
+@keyframes breathe { 0%, 100% { opacity: .75; } 50% { opacity: 1; } }
+@keyframes ping { 0% { transform: scale(.35); opacity: .85; } 100% { transform: scale(1.6); opacity: 0; } }
+
+/* -------------------------------------------------------------------- strips */
+
+.topStrip, .bottomStrip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: clamp(5px, 1.3cqw, 12px);
+  min-height: clamp(15px, 3.4cqw, 26px);
+  padding: 0 clamp(6px, 1.5cqw, 14px);
+  font-size: clamp(6.5px, 1.42cqw, 11px);
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.topStrip { top: 0; background: linear-gradient(to bottom, rgba(5, 8, 6, .82), transparent); padding-top: clamp(3px, .8cqw, 7px); }
+.bottomStrip { bottom: 0; background: linear-gradient(to top, rgba(5, 8, 6, .82), transparent); padding-bottom: clamp(3px, .8cqw, 7px); }
+
+.spacer { flex: 1 1 auto; }
+
+.callsign { display: flex; align-items: center; gap: .5em; color: var(--role); font-weight: 600; letter-spacing: .1em; }
+.callsign i { width: .62em; height: .62em; flex: 0 0 auto; background: var(--role); box-shadow: 0 0 0 .22em rgba(var(--role-rgb), .22); }
+
+.roleName { color: #dfe6df; opacity: .9; }
+.sensor, .mission { color: rgba(223, 230, 223, .55); }
+/* The name the mod knows it by, which is not the callsign and is what /drone commands take. */
+.droneId { color: rgba(223, 230, 223, .45); text-transform: none; }
+.cell { color: rgba(230, 237, 230, .84); }
+.cell[data-warning="true"] { color: #ffb800; }
+
+.roleChip {
+  padding: .25em .6em;
+  color: #0a0d0b;
+  background: var(--role);
+  font-weight: 600;
+  letter-spacing: .06em;
+}
+
+/* The tally light. It is only red while frames are actually arriving. */
+.rec { display: flex; align-items: center; gap: .45em; color: rgba(223, 230, 223, .45); }
+.rec::before { content: ""; width: .6em; height: .6em; border-radius: 50%; background: currentColor; }
+.rec[data-live="true"] { color: #e2604a; }
+.rec[data-live="true"]::before { animation: tally 1.6s steps(1, end) infinite; }
+@keyframes tally { 0%, 55% { opacity: 1; } 56%, 100% { opacity: .2; } }
+
+.timecode { color: #e9efe9; }
+
+.stamp {
+  position: absolute;
+  right: clamp(6px, 1.5cqw, 14px);
+  bottom: clamp(20px, 4.6cqw, 36px);
+  color: rgba(216, 224, 216, .4);
+  font-size: clamp(6px, 1.16cqw, 9px);
+  letter-spacing: .1em;
+}
+
+/* -------------------------------------------------------------- the role panel */
+
+.panel {
+  position: absolute;
+  top: clamp(22px, 5cqw, 40px);
+  right: clamp(6px, 1.5cqw, 14px);
+  width: clamp(112px, 17cqw, 178px);
+  padding: clamp(5px, 1cqw, 9px) clamp(6px, 1.2cqw, 11px) clamp(6px, 1.2cqw, 10px);
+  background: rgba(7, 10, 8, .62);
+  border: 1px solid rgba(var(--role-rgb), .35);
+  border-left: 2px solid var(--role);
+  font-size: clamp(7px, 1.28cqw, 10px);
+  backdrop-filter: blur(4px);
+}
+
+.panel h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 .55em;
+  color: var(--role);
+  font-size: 1em;
+  font-weight: 600;
+  letter-spacing: .12em;
+}
+
+.panel h3 b { padding: .1em .4em; color: #0a0d0b; background: rgba(226, 233, 226, .55); font-size: .82em; font-weight: 600; }
+.panelEmpty { margin: 0 0 .5em; color: rgba(223, 230, 223, .5); text-transform: none; }
+
+.row { display: flex; align-items: baseline; justify-content: space-between; gap: .6em; padding: .22em 0; }
+.row span { color: rgba(223, 230, 223, .58); }
+.row strong { color: #eef3ee; font-weight: 500; }
+
+/* The retardant tank, drained from the top like the real gauge. */
+.tank { position: relative; height: clamp(24px, 4.6cqw, 42px); margin-bottom: .55em; background: rgba(255, 255, 255, .07); border: 1px solid rgba(var(--role-rgb), .3); }
+.tank span { position: absolute; right: 0; bottom: 0; left: 0; background: linear-gradient(to top, var(--role), rgba(var(--role-rgb), .55)); transition: height 400ms ease; }
+.tank span[data-low="true"] { background: linear-gradient(to top, #d0603f, rgba(208, 96, 63, .5)); }
+
+/* The ironbow key, so a temperature on the picture means something. */
+.scale { height: clamp(6px, 1.1cqw, 9px); margin-bottom: .6em; background: linear-gradient(to right, #10121a, #4a2270, #b83a2a, #e88b25, #ffe9a8); }
+
+.link { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: .5em; padding: .18em 0; }
+.link span { color: rgba(223, 230, 223, .72); }
+.link i { display: block; height: .5em; background: rgba(255, 255, 255, .1); }
+.link i b { display: block; height: 100%; background: var(--role); }
+.link em { color: #eef3ee; font-style: normal; }
+.link[data-weak="true"] i b { background: #d98c5a; }
+.link[data-weak="true"] em { color: #e8b48c; }
+
+/* ----------------------------------------------------------------- thumbnails */
+
+/*
+ * On a tile the strips stay and everything explanatory goes.
+ *
+ * A twelve-up wall is answering one question - which drone is doing what, and is any of them
+ * looking at a fire - so it keeps the callsign, the role, the tally light and the boxes, and
+ * drops the compass, the horizon, the panel and the scan lines that would only be mud at that
+ * size.
+ */
+.hud[data-compact="true"] .grain { opacity: .3; }
+.hud[data-compact="true"] .topStrip, .hud[data-compact="true"] .bottomStrip { gap: clamp(4px, 1.1cqw, 9px); }
+
+@container (max-width: 300px) { .roleName { display: none; } }
+@container (max-width: 220px) { .droneId, .cell:nth-of-type(2) { display: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .sweep, .isotherm, .sweepRing circle, .rec[data-live="true"]::before { animation: none; }
+  .sweep { opacity: .3; }
+}

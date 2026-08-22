@@ -2,20 +2,23 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { Drone } from "@/lib/use-cameras";
+import { hotspotsNear, useIntel } from "@/lib/fleet-intel";
+import { bearingName, roleOf } from "@/lib/roles";
+import { simulatedTelemetry, type Telemetry } from "@/lib/simulated-telemetry";
 import styles from "./flight-telemetry.module.css";
 
-type Telemetry = {
-  battery: number;
-  voltage: number;
-  batteryTemp: number;
-  motorTemp: number;
-  signal: number;
-  latency: number;
-  speed: number;
-  altitude: number;
-  voltageTrace: number[];
-  thermalTrace: number[];
-};
+/**
+ * The airframe panel beside a singled-out feed.
+ *
+ * It used to model its own battery and its own temperatures. It no longer does: the head-up
+ * display over the picture shows the same aircraft, and two simulations of one battery is a
+ * dashboard that disagrees with itself an inch apart. Both read {@link simulatedTelemetry}.
+ *
+ * What is left here is what the HUD does not carry - the flight path it has actually taken, the
+ * two traces with history in them - and the four readings that depend on what the drone is *for*:
+ * a suppression ship's operator wants the tank and the wind, a relay's wants the mesh, and
+ * neither of them wants a generic signal percentage.
+ */
 
 export type DroneTrailPoint = {
   x: number;
@@ -23,39 +26,6 @@ export type DroneTrailPoint = {
   at: number;
   stopped: boolean;
 };
-
-/**
- * A deliberately isolated demo feed. The camera API does not emit hardware telemetry yet, but
- * having the presentation wired in lets the real sensor payload replace this one field-for-field.
- */
-function simulatedTelemetry(drone: Drone, now: number): Telemetry {
-  const seed = Array.from(drone.id).reduce((sum, character) => sum + character.charCodeAt(0), 0);
-  const phase = now / 6_000 + seed;
-  const wave = (offset: number) => Math.sin(phase + offset);
-  const altitude = Math.max(0, drone.y - 62);
-  const speed = Math.max(0.1, 6.5 + wave(0.7) * 1.3);
-  const battery = Math.max(16, Math.min(100, 78 - (seed % 19) - wave(0.3) * 2));
-  const batteryTemp = 34 + wave(1.2) * 2.8;
-  const voltage = 21.4 + battery / 100 * 3.5 + wave(2.1) * 0.12;
-  const trace = (base: number, amplitude: number, offset: number) =>
-    Array.from({ length: 28 }, (_, index) =>
-      base + Math.sin(phase - (28 - index) * 0.17 + offset) * amplitude
-      + Math.sin(phase * 0.37 - index * 0.6 + offset) * amplitude * 0.24,
-    );
-
-  return {
-    battery,
-    voltage,
-    batteryTemp,
-    motorTemp: 43 + wave(2.5) * 4.2,
-    signal: 89 + Math.round(wave(3.1) * 5),
-    latency: 24 + Math.round(Math.abs(wave(1.8)) * 11),
-    speed,
-    altitude,
-    voltageTrace: trace(voltage, 0.24, 0),
-    thermalTrace: trace(batteryTemp, 1.8, 0.9),
-  };
-}
 
 function tracePoints(values: number[], width = 250, height = 62) {
   const min = Math.min(...values);
@@ -135,15 +105,64 @@ function RouteTrace({ points }: { points: DroneTrailPoint[] }) {
   </svg>;
 }
 
+/**
+ * The four readings this role is actually flown on.
+ *
+ * Deliberately not one panel with the irrelevant rows greyed out: a suppression ship and a mesh
+ * relay do not measure the same things, and showing four blanks says they do.
+ */
+function roleReadings(drone: Drone, telemetry: Telemetry, hot: { distance: number }[], peers: number) {
+  const role = roleOf(drone.id);
+  switch (role.hud) {
+    case "suppress": return [
+      { label: "Retardant", value: telemetry.payload.toFixed(0), unit: "%", warning: telemetry.payload < 20 },
+      { label: "Wind", value: `${telemetry.wind.toFixed(0)} ${bearingName(telemetry.windBearing)}`, unit: "kt" },
+      { label: "Target", value: hot[0] ? Math.round(hot[0].distance).toString() : "—", unit: hot[0] ? "m" : "" },
+      { label: "Drops", value: String(Math.floor(drone.frames / 900) % 9), unit: "" },
+    ];
+    case "thermal": return [
+      { label: "Peak", value: Math.round(telemetry.peak).toString(), unit: "°C", warning: telemetry.peak > 460 },
+      { label: "Ambient", value: (telemetry.batteryTemp - 8).toFixed(0), unit: "°C" },
+      { label: "Sources", value: String(hot.length), unit: "" },
+      { label: "Palette", value: "Ironbow", unit: "" },
+    ];
+    case "relay": return [
+      { label: "Mesh peers", value: String(peers), unit: "", warning: peers === 0 },
+      { label: "Backhaul", value: telemetry.uplink.toFixed(0), unit: "Mb" },
+      { label: "Latency", value: telemetry.latency.toFixed(0), unit: "ms" },
+      { label: "Altitude", value: telemetry.altitude.toFixed(0), unit: "m" },
+    ];
+    case "rescue": return [
+      { label: "Returns", value: String(telemetry.contacts), unit: "" },
+      { label: "Swept", value: telemetry.coverage.toFixed(0), unit: "%" },
+      { label: "Nearest fire", value: hot[0] ? Math.round(hot[0].distance).toString() : "clear", unit: hot[0] ? "m" : "" },
+      { label: "Battery", value: telemetry.battery.toFixed(0), unit: "%", warning: telemetry.battery < 30 },
+    ];
+    default: return [
+      { label: "Coverage", value: telemetry.coverage.toFixed(0), unit: "%" },
+      { label: "Hotspots", value: String(hot.length), unit: "" },
+      { label: "Ground res", value: (telemetry.altitude / 40 + 0.4).toFixed(2), unit: "m/px" },
+      { label: "Battery", value: telemetry.battery.toFixed(0), unit: "%", warning: telemetry.battery < 30 },
+    ];
+  }
+}
+
 export default function FlightTelemetry({ drone, trail }: { drone: Drone; trail: DroneTrailPoint[] }) {
   const [now, setNow] = useState(() => Date.now());
+  const intel = useIntel();
+  const role = roleOf(drone.id);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, []);
 
-  const telemetry = useMemo(() => simulatedTelemetry(drone, now), [drone, now]);
+  const telemetry = useMemo(() => simulatedTelemetry(drone, now, role), [drone, now, role]);
+  const hot = useMemo(
+    () => hotspotsNear(intel.hotspots, drone.x, drone.z, 300, 8),
+    [intel.hotspots, drone.x, drone.z],
+  );
+  const peers = Math.max(0, intel.drones.length - 1);
 
   return <aside className={styles.telemetry} aria-label={`${drone.id} flight telemetry`}>
     <header className={styles.header}>
@@ -156,23 +175,15 @@ export default function FlightTelemetry({ drone, trail }: { drone: Drone; trail:
 
     <RouteTrace points={trail} />
 
-    <div className={styles.primaryReadings}>
-      <Reading label="Battery" value={telemetry.battery.toFixed(0)} unit="%" warning={telemetry.battery < 30} />
-      <Reading label="Altitude" value={telemetry.altitude.toFixed(1)} unit="m" />
-      <Reading label="Ground speed" value={telemetry.speed.toFixed(1)} unit="m/s" />
-      <Reading label="Signal" value={telemetry.signal.toFixed(0)} unit="%" />
+    <div className={styles.primaryReadings} style={{ "--role": role.color } as React.CSSProperties}>
+      {roleReadings(drone, telemetry, hot, peers).map((reading) => (
+        <Reading key={reading.label} {...reading} />
+      ))}
     </div>
 
     <div className={styles.traces}>
       <Trace label="Battery voltage" value={telemetry.voltage.toFixed(1)} unit="V" values={telemetry.voltageTrace} tone="amber" />
       <Trace label="Battery temperature" value={telemetry.batteryTemp.toFixed(1)} unit="°C" values={telemetry.thermalTrace} tone="green" />
-    </div>
-
-    <div className={styles.systems}>
-      <Reading label="Motor temperature" value={telemetry.motorTemp.toFixed(1)} unit="°C" />
-      <Reading label="Video latency" value={telemetry.latency.toFixed(0)} unit="ms" />
-      <Reading label="Camera profile" value={drone.detail ? "Detail" : "Grid"} unit="" />
-      <Reading label="Frames captured" value={drone.frames.toLocaleString()} unit="" />
     </div>
   </aside>;
 }

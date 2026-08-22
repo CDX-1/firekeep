@@ -97,12 +97,16 @@ def notify(payload):
     :return: True if it was queued, False if forwarding is off or the queue shed it
     """
     if not events_url():
+        print("[n8n] event forwarding is disabled", flush=True)
         return False
     start()
     body = json.dumps(payload).encode()
     while True:
         try:
             _OUTBOX.put_nowait(body)
+            print("[n8n] queued event "
+                  f"id={payload.get('id', '-')} type={payload.get('event') or payload.get('type') or '-'} "
+                  f"agent={payload.get('drone_id') or payload.get('agent_id') or '-'}", flush=True)
             return True
         except queue.Full:
             try:
@@ -140,6 +144,7 @@ def _deliver(body):
                     print(f"n8n webhook reachable at {url}")
                 _STATE.update(online=True, error=None, quiet_until=0.0)
                 _STATE["sent"] += 1
+            print(f"[n8n] delivered event ({len(body)} bytes) -> HTTP {response.status}", flush=True)
             return
         except urllib.error.HTTPError as e:
             error = f"HTTP {e.code}"

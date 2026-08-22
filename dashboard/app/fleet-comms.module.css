@@ -1,0 +1,36 @@
+/* The radio log in the sidebar: quiet enough to ignore, alive enough to notice. */
+
+.comms { display: flex; flex-direction: column; gap: 6px; padding: 10px 13px 12px; border-top: 1px solid var(--line); }
+
+.head { display: flex; align-items: baseline; justify-content: space-between; }
+.title { color: var(--muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.state { display: flex; align-items: center; gap: 5px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; text-transform: uppercase; }
+.state::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.state[data-live="true"] { color: var(--accent); }
+
+.empty { margin: 0; color: var(--muted); font-size: 10px; }
+
+.log { display: flex; flex-direction: column; gap: 5px; max-height: 190px; margin: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; }
+.log::-webkit-scrollbar { display: none; }
+.log { -ms-overflow-style: none; scrollbar-width: none; }
+
+/*
+ * Each line: the callsign in the aircraft's own colour, then what it said.
+ *
+ * The newest line fades in rather than appearing, which is the difference between a log that is
+ * running and a log that has been sitting there since the page loaded.
+ */
+.log li { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9.5px; line-height: 1.35; }
+.log li:first-child { animation: arrive 260ms ease-out both; }
+.log li[data-ops="true"] .text { color: #b9c6c1; }
+
+.stamp { color: rgba(150, 150, 150, .6); }
+.from { flex: 0 0 auto; font-weight: 600; letter-spacing: .04em; }
+.text { min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+
+/* Older traffic recedes, so the eye goes to what has just come in. */
+.log li:nth-child(n + 6) { opacity: .62; }
+.log li:nth-child(n + 12) { opacity: .38; }
+
+@keyframes arrive { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .log li:first-child { animation: none; } }

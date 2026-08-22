@@ -304,7 +304,6 @@ public final class DroneApiServer {
 
     private static JsonObject dispatch(JsonObject body) {
         double x = required(body, "x");
-        double y = required(body, "y");
         double z = required(body, "z");
         String dimension = body.has("dimension") ? body.get("dimension").getAsString() : null;
 
@@ -315,23 +314,36 @@ public final class DroneApiServer {
             order = new JsonObject();
             order.addProperty("command", "move_to");
             order.addProperty("x", x);
-            order.addProperty("y", y);
             order.addProperty("z", z);
         }
 
-        DroneManager.DispatchResult result = DroneManager.dispatch(new Vec3(x, y, z), dimension, order);
+        // Two responders is the safe default: a lead can suppress while a second drone verifies
+        // the perimeter. Workflows may request a larger crew explicitly.
+        int count = body.has("count") ? Math.max(1, Math.min(8, body.get("count").getAsInt())) : 2;
+        List<DroneManager.DispatchResult> responders = DroneManager.dispatchMany(
+                new Vec3(x, 0.0D, z), dimension, order, count);
         JsonObject json = new JsonObject();
-        if (result.drone() == null) {
+        if (responders.isEmpty()) {
             json.addProperty("dispatched", false);
             json.addProperty("message", "no drone is available"
                     + (dimension == null ? "" : " in " + dimension));
             return json;
         }
+        DroneManager.DispatchResult lead = responders.getFirst();
+        JsonArray drones = new JsonArray();
+        for (DroneManager.DispatchResult responder : responders) {
+            JsonObject item = responder.drone().toJson();
+            item.addProperty("distance", PerceptionSnapshot.round(responder.distance()));
+            item.addProperty("command_id", responder.command().id());
+            drones.add(item);
+        }
         json.addProperty("dispatched", true);
-        json.addProperty("drone_id", result.drone().id());
-        json.addProperty("distance", PerceptionSnapshot.round(result.distance()));
-        json.addProperty("command_id", result.command().id());
-        json.add("drone", result.drone().toJson());
+        json.addProperty("drone_id", lead.drone().id()); // retained for existing single-dispatch callers
+        json.addProperty("distance", PerceptionSnapshot.round(lead.distance()));
+        json.addProperty("command_id", lead.command().id());
+        json.add("drone", lead.drone().toJson());
+        json.add("drones", drones);
+        json.addProperty("count", responders.size());
         return json;
     }
 

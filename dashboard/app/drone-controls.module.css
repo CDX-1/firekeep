@@ -6,7 +6,7 @@
  * meets a wall. Everything here floats over the image, keeps out of the middle of the frame, and
  * fades back when nobody is reaching for it.
  */
-.controls { position: absolute; inset: 0; z-index: 2; display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto 1fr; align-items: start; gap: 10px; padding: clamp(9px, 1.4vw, 16px); pointer-events: none; }
+.controls { position: absolute; inset: 0; z-index: 2; display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto 1fr; align-items: start; gap: 10px; padding: 30px clamp(9px, 1.4vw, 16px) 32px; pointer-events: none; }
 
 /* Only the controls take the mouse; the picture behind them stays clickable. */
 .controls > * { pointer-events: auto; }
@@ -59,13 +59,13 @@
 .status[data-error="true"] { color: #f0b6ac; opacity: 1; }
 
 /* A thumbnail has no room for a pad; the bar is enough to take control from. */
-.controls[data-compact="true"] { padding: 7px; gap: 6px; }
+.controls[data-compact="true"] { padding: 22px 7px 22px; gap: 6px; }
 .controls[data-compact="true"] .pad, .controls[data-compact="true"] .altitude { display: none; }
 .controls[data-compact="true"] .status { font-size: 9px; }
 .controls[data-compact="true"] .pitch { display: none; }
 
 @media (max-width: 720px) {
-  .controls { padding: 8px; gap: 7px; }
+  .controls { padding: 24px 8px 26px; gap: 7px; }
   .pad { grid-template-columns: repeat(3, 28px); grid-template-rows: repeat(3, 28px); }
   .altitude button { height: 28px; }
   .altitude button span { display: none; }

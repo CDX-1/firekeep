@@ -95,6 +95,31 @@ JOBS_BY_ID = {}                         # id -> dict
 WORK = queue.Queue()
 WORLD_LOCK = threading.Lock()
 WORLD_BY_DIM = {}               # dimension -> {meta, png, stamp}
+# Minecraft touches region files while saving. Rendering the complete disk map for both the
+# metadata request and the following PNG request makes the browser cancel the first image and
+# leaves the dashboard in a permanent loading loop. The live feed paints changes immediately;
+# this base layer only needs a short stability window.
+WORLD_CACHE_SECONDS = 30.0
+LIVE_LOG_LOCK = threading.Lock()
+LIVE_LOG_AT = 0.0
+LIVE_LOG_INTERVAL = 30.0
+
+
+def bridge_log(channel, message):
+    """One human-readable audit line for traffic crossing the n8n/Minecraft boundary."""
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[{stamp}] [{channel}] {message}", flush=True)
+
+
+def log_live_heartbeat(columns, commands):
+    """The mod posts five times a second; retain proof of life without flooding the console."""
+    global LIVE_LOG_AT
+    now = time.monotonic()
+    with LIVE_LOG_LOCK:
+        if now - LIVE_LOG_AT < LIVE_LOG_INTERVAL:
+            return
+        LIVE_LOG_AT = now
+    bridge_log("minecraft", f"live feed active: columns={columns}, queued_commands={commands}")
 
 
 # auto-triggered generation should be cheap by default; override with --model
@@ -408,7 +433,9 @@ def world_map(dimension, save=None, refresh=False):
     with WORLD_LOCK:
         stamp = world_stamp(save, dimension)
         cached = WORLD_BY_DIM.get(dimension)
-        if cached and not refresh and cached["stamp"] == stamp:
+        if cached and not refresh and (
+                cached["stamp"] == stamp
+                or time.monotonic() - cached["rendered_at"] < WORLD_CACHE_SECONDS):
             return cached["png"], cached["meta"]
 
         png, meta = worldmap.render(save, dimension)
@@ -418,7 +445,8 @@ def world_map(dimension, save=None, refresh=False):
         (WORLD / f"{dimension}.png").write_bytes(png)
         (WORLD / f"{dimension}.json").write_text(json.dumps(meta, indent=2))
 
-        WORLD_BY_DIM[dimension] = {"png": png, "meta": meta, "stamp": stamp}
+        WORLD_BY_DIM[dimension] = {"png": png, "meta": meta, "stamp": stamp,
+                                   "rendered_at": time.monotonic()}
         print(f"world map: {dimension} {meta['width']}x{meta['height']} "
               f"from {meta['chunks']} chunks in {meta['took_seconds']}s")
         return png, meta
@@ -444,14 +472,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write(body)
 
     def send_bytes(self, body, ctype, status=HTTPStatus.OK):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        self._write(body)
+
+    def _write(self, body):
+        """A browser cancelling an image fetch is normal, not a hub failure."""
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     # -- who is asking -------------------------------------------------------
     def is_local(self):
@@ -528,12 +563,17 @@ class Handler(BaseHTTPRequestHandler):
         # ?wait=true asks the mod to hold the reply until the drone has finished, which is a
         # flight rather than a request - so the timeout has to be a flight's worth of patience.
         waiting = str(query.get("wait", "")).lower() in ("1", "true", "yes")
+        started = time.monotonic()
         try:
             payload = minecraft.request(method, path, body, query=query,
                                         timeout=minecraft.LONG_TIMEOUT if waiting
                                         else minecraft.DEFAULT_TIMEOUT)
         except minecraft.MinecraftError as e:
+            bridge_log("minecraft", f"{method} /api{path} -> {e.status} in "
+                       f"{(time.monotonic() - started) * 1000:.0f}ms: {e}")
             return self.send_json({"ok": False, "error": str(e)}, e.status)
+        bridge_log("minecraft", f"{method} /api{path} -> 200 in "
+                   f"{(time.monotonic() - started) * 1000:.0f}ms")
         return self.send_json(payload)
 
     # -- POST /capture ------------------------------------------------------
@@ -557,8 +597,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 event = live.record_mod_event(json.loads(self.rfile.read(length)))
             except (json.JSONDecodeError, ValueError, TypeError) as e:
+                bridge_log("minecraft", f"rejected mod event: {e}")
                 return self.send_json({"error": f"bad mod event: {e}"}, HTTPStatus.BAD_REQUEST)
             forwarded = n8n.notify(event)
+            bridge_log("minecraft", "event received: "
+                       f"id={event['id']} type={event['event']} agent={event.get('drone_id') or '-'} "
+                       f"forwarded_to_n8n={forwarded}")
             return self.send_json({"ok": True, "event": event, "forwarded": forwarded},
                                   HTTPStatus.ACCEPTED)
 
@@ -571,7 +615,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(self.rfile.read(length))
                 delta, commands = live.ingest(payload)
             except (json.JSONDecodeError, ValueError, TypeError) as e:
+                bridge_log("minecraft", f"rejected live feed: {e}")
                 return self.send_json({"error": f"bad live batch: {e}"}, HTTPStatus.BAD_REQUEST)
+            log_live_heartbeat(len(delta["columns"]) // 3, len(commands))
             return self.send_json({"ok": True, "columns": len(delta["columns"]) // 3,
                                    "hot": delta["hot"], "watchers": live.subscriber_count(),
                                    "commands": commands})
@@ -585,7 +631,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 event = live.record_drone_event(json.loads(self.rfile.read(length)))
             except (json.JSONDecodeError, ValueError, TypeError) as e:
+                bridge_log("n8n", f"rejected feed event: {e}")
                 return self.send_json({"error": f"bad drone event: {e}"}, HTTPStatus.BAD_REQUEST)
+            bridge_log("n8n", "feed event received: "
+                       f"id={event['id']} type={event['type']} drone={event['drone_id']} "
+                       f"severity={event['severity']}")
             return self.send_json({"ok": True, "event": event}, HTTPStatus.ACCEPTED)
 
         # set off a disaster; same channel as a drone order, and the outcome comes back
@@ -935,7 +985,7 @@ class Handler(BaseHTTPRequestHandler):
             for k, v in meta.items():
                 self.send_header(f"X-Live-{k.replace('_', '-')}", str(v))
             self.end_headers()
-            return self.wfile.write(png)
+            return self._write(png)
 
         if path == "/api/events":
             q = parse_qs(urlparse(self.path).query)

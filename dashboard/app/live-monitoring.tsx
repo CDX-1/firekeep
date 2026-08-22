@@ -3,23 +3,25 @@
 import { useEffect, useRef, useState } from "react";
 import styles from "./live-monitoring.module.css";
 import { AREAS, type Filter } from "./drones";
-import { CameraIcon, Chevron, EmptyImage } from "./icons";
+import { CameraIcon, Chevron } from "./icons";
 import DroneControls from "./drone-controls";
 import DroneEventWindow from "./drone-event-window";
+import FeedOverlay from "./feed-overlay";
+import FleetComms from "./fleet-comms";
 import FlightTelemetry, { type DroneTrailPoint } from "./flight-telemetry";
+import { ROLE_LIST, callsignOf, roleOf } from "@/lib/roles";
 import { detailSizeFor, streamUrl, type Profile, type Size } from "@/lib/cameras";
-import { pauseFrames } from "@/lib/frames";
 import type { Connection } from "@/lib/camera-feed";
-import { useDroneFrame, useRoster, useTransport, type Transport } from "@/lib/use-cameras";
+import { useDroneFrame, useFeed, useRoster, type Drone } from "@/lib/use-cameras";
 
 /**
  * How much of a feed a tile is asking for.
  *
- * `still` is the grid default: whatever the transport in use delivers at the grid's rate - a
- * share of the multiplexed stream, or a fetched frame. `stream` is this drone's own MJPEG
- * response, running as fast as the agent renders it, which is worth its own connection only for
- * a feed somebody is actually watching. `off` keeps the last frame on screen and asks for
- * nothing.
+ * `still` is the grid default: this drone's share of the multiplexed feed, at the grid's rate.
+ * `stream` is this drone's own MJPEG response, running as fast as the agent renders it, which is
+ * worth its own connection only for a feed somebody is actually watching. `off` keeps the last
+ * frame on screen and asks for nothing - which is also what takes the drone off the shared feed,
+ * so a grid hidden behind the viewer costs nothing.
  */
 type FeedMode = "off" | "still" | "stream";
 
@@ -40,11 +42,11 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
   const trailCache = useRef<Record<string, DroneTrailPoint[]>>({});
   const [trails, setTrails] = useState<Record<string, DroneTrailPoint[]>>({});
 
-  // Streaming by default; polling is the fallback, and a switch the operator can throw.
-  const { transport, preferred, choose, connection, error } = useTransport();
-  // Flying by hand needs a fresher position than a wall of thumbnails does - which only the
-  // polling path has to be told, since the stream already carries the mod's own positions.
-  const { drones, reachable, online } = useRoster(transport, controllingId !== null);
+  // One connection carries the roster and every frame, so nothing here has a rate to choose.
+  // Flying by hand needs no special handling either: the stream already carries the mod's own
+  // positions about five times a second.
+  const { connection, error } = useFeed();
+  const { drones, reachable, online } = useRoster();
 
   // Keep recent flight history even while another feed is selected. A point only enters when the
   // drone has moved far enough to make the line useful; a later point at the same location is a
@@ -84,7 +86,7 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
   };
 
   // A handover is honoured once, and only once the roster actually carries that drone: a
-  // request can land a poll or two before the drone it names does.
+  // request can land a push or two before the drone it names does.
   useEffect(() => {
     if (!request || request === handledRequest.current) return;
     const drone = drones.find((item) => item.id === request.id);
@@ -113,13 +115,6 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
   useEffect(() => {
     if (controllingId && controllingId !== watchedId) setControllingId(null);
   }, [controllingId, watchedId]);
-
-  // The grid is behind a full-screen overlay while the viewer is open, so it has nothing to
-  // show and no business holding connections the viewer needs.
-  useEffect(() => {
-    pauseFrames(selectedId !== null);
-    return () => pauseFrames(false);
-  }, [selectedId]);
 
   useEffect(() => {
     if (!selectedDrone && !controllingId) return;
@@ -167,18 +162,27 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
                   <span>{area}</span><span>{areaDrones.length}</span>
                 </button>
                 <div className={styles.droneList}>
-                  {areaDrones.map((drone) => (
-                    <button key={drone.id} data-active={focusedId === drone.id} type="button" onClick={() => {
-                      setActiveFilter(area);
-                      setFocusedId(drone.id);
-                      setSelectedId(null);
-                    }}><i /><CameraIcon /><span>{drone.id}</span></button>
-                  ))}
+                  {areaDrones.map((drone) => {
+                    const role = roleOf(drone.id);
+                    return <button key={drone.id} data-active={focusedId === drone.id} type="button"
+                      title={`${drone.id} - ${role.name}: ${role.tagline}`}
+                      style={{ "--role": role.color } as React.CSSProperties}
+                      onClick={() => {
+                        setActiveFilter(area);
+                        setFocusedId(drone.id);
+                        setSelectedId(null);
+                      }}>
+                      <i /><CameraIcon />
+                      <span className={styles.droneName}>{callsignOf(drone.id)}</span>
+                      <span className={styles.roleTag}>{role.code}</span>
+                    </button>;
+                  })}
                 </div>
               </section>;
             })}
-            <TransportSwitch preferred={preferred} transport={transport}
-                             connection={connection} error={error} onChoose={choose} />
+            <FleetComposition drones={drones} />
+            <FeedState connection={connection} error={error} />
+            <FleetComms drones={drones} />
           </nav>}
         </aside>
 
@@ -190,14 +194,17 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
                     connection a stream costs - and flying by hand needs every frame it can get. */}
                 <Feed
                   id={drone.id}
-                  transport={transport}
+                  live={drone.live}
                   mode={selectedId !== null ? "off" : focusedDrone?.id === drone.id ? "stream" : "still"}
                 />
                 {/* Opening the feed is the whole picture's job, so the target is the picture -
                     but it has to be a sibling of the HUD rather than its parent, because a
                     button inside a button is not a thing a browser will honour. */}
+                <FeedOverlay
+                  drone={drone}
+                  variant={focusedDrone?.id === drone.id && selectedId === null ? "focus" : "tile"}
+                />
                 <button className={styles.open} type="button" aria-label={`Open ${drone.id} feed`} onClick={() => setSelectedId(drone.id)} />
-                <span className={styles.feedLabel}>{drone.id}</span>
                 <DroneEventWindow droneId={drone.id} compact />
                 {/* The overlay owns the controls once it is open, so only ever one panel is
                     listening for the keys. */}
@@ -238,16 +245,11 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
               <Chevron direction="left" />
             </button>}
             <div className={styles.viewerPanel} key={selectedDrone.id}>
-              <Feed id={selectedDrone.id} mode="stream" transport={transport} />
+              <Feed id={selectedDrone.id} mode="stream" live={selectedDrone.live} />
+              {/* Where it is, what it is for, and what the agent is rendering it at all live on
+                  the head-up display now, rather than on a strip underneath the picture. */}
+              <FeedOverlay drone={selectedDrone} variant="viewer" />
               <DroneEventWindow droneId={selectedDrone.id} />
-              {/* Where it is, and what the agent is actually rendering it at - which goes up
-                  while this is the feed on screen and drops back on its own once it closes. */}
-              <span className={styles.readout}>
-                {Math.round(selectedDrone.x)}, {Math.round(selectedDrone.y)}, {Math.round(selectedDrone.z)}
-                <b data-detail={selectedDrone.detail === true}>
-                  {selectedDrone.width}×{selectedDrone.height} · {selectedDrone.fps} fps
-                </b>
-              </span>
               <DroneControls
                 drone={selectedDrone}
                 controlling={controllingId === selectedDrone.id}
@@ -265,41 +267,51 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
 }
 
 /**
- * How the pictures are getting here, and a switch to change it.
+ * What the fleet is made of, at a glance.
  *
- * <p>Worth having on screen rather than buried in a setting: streaming and polling fail in
- * different ways, and being able to put the dashboard on the dumb transport is the quickest way
- * to find out whether a blank grid is Minecraft's fault or the stream's.
+ * Roles are worked out from the drone ids rather than assigned by anyone, so the mix is whatever
+ * happens to be in the air - which is exactly the thing an operator wants to know before sending
+ * anyone anywhere. Four surveyors and no suppression is a fleet that can watch a fire burn.
  */
-function TransportSwitch({ preferred, transport, connection, error, onChoose }: {
-  preferred: Transport;
-  transport: Transport;
-  connection: Connection;
-  error: string | null;
-  onChoose: (next: Transport) => void;
-}) {
-  // Asked for the stream and got polling: it dropped out from under us, and that is worth saying.
-  const fellBack = preferred === "stream" && transport === "poll";
-  const label = fellBack
-    ? "Stream unavailable - polling"
-    : transport === "stream"
-      ? connection === "live" ? "Streaming" : "Connecting"
-      : "Polling";
+function FleetComposition({ drones }: { drones: Drone[] }) {
+  if (drones.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const drone of drones) {
+    const role = roleOf(drone.id);
+    counts.set(role.id, (counts.get(role.id) ?? 0) + 1);
+  }
 
   return (
-    <div className={styles.transport}>
-      <span className={styles.transportState} data-state={fellBack ? "failed" : connection}
-            title={error ?? undefined}>
+    <div className={styles.composition} aria-label="Fleet composition">
+      {ROLE_LIST.filter((role) => counts.has(role.id)).map((role) => (
+        <span key={role.id} className={styles.compositionRole}
+              style={{ "--role": role.color } as React.CSSProperties}
+              title={`${counts.get(role.id)} x ${role.name} - ${role.tagline}`}>
+          <i />{role.code}<b>{counts.get(role.id)}</b>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Whether the pictures are getting here.
+ *
+ * There is nothing to choose any more - there is one connection and it carries everything - but
+ * whether it is up is still worth a line on screen: a blank grid is either Minecraft not running
+ * or the feed not arriving, and this is the half that says which. The reason for a drop is on
+ * the title, because it is a developer's answer rather than an operator's.
+ */
+function FeedState({ connection, error }: { connection: Connection; error: string | null }) {
+  const label = connection === "live" ? "Streaming"
+    : connection === "retrying" ? "Reconnecting"
+    : "Connecting";
+
+  return (
+    <div className={styles.feedStatus}>
+      <span className={styles.feedStatusLine} data-state={connection} title={error ?? undefined}>
         <i />{label}
       </span>
-      <div className={styles.transportChoice} role="group" aria-label="Camera transport">
-        {(["stream", "poll"] as const).map((option) => (
-          <button key={option} type="button" data-active={preferred === option}
-                  aria-pressed={preferred === option} onClick={() => onChoose(option)}>
-            {option === "stream" ? "Stream" : "Poll"}
-          </button>
-        ))}
-      </div>
     </div>
   );
 }
@@ -308,20 +320,21 @@ function TransportSwitch({ preferred, transport, connection, error, onChoose }: 
  * One drone's picture.
  *
  * <p>A fixed-ratio box with both images stacked inside it, rather than an image that decides the
- * layout. Nothing reflows when a stream takes over from the stills, and the box has a real width
+ * layout. Nothing reflows when the drone's own stream takes over from the shared feed's frames,
+ * and the box has a real width
  * from the first render - which is what lets the feed ask for a resolution that suits the space
  * it is actually being shown in rather than a fixed guess.
  *
  * <p>Its own MJPEG stream takes a moment to open, so the stills stay on screen underneath until
  * the first streamed frame lands, and the stream is only revealed then.
  */
-function Feed({ id, mode, transport }: { id: string; mode: FeedMode; transport: Transport }) {
+function Feed({ id, mode, live }: { id: string; mode: FeedMode; live: boolean }) {
   const [streaming, setStreaming] = useState(false);
   const wantStream = mode === "stream";
   // Singled out: this is the picture somebody is actually looking at, so it is worth the agent
   // rendering this one drone properly rather than at its share of a thumbnail wall.
   const profile: Profile | undefined = wantStream ? "detail" : undefined;
-  const { image: still, ready } = useDroneFrame(id, mode !== "off" && !streaming, transport, wantStream, profile);
+  const { image: still, ready } = useDroneFrame(id, mode !== "off" && !streaming);
   const box = useRef<HTMLDivElement>(null);
   const stream = useRef<HTMLImageElement>(null);
   const size = useFeedSize(box, wantStream);
@@ -333,15 +346,25 @@ function Feed({ id, mode, transport }: { id: string; mode: FeedMode; transport: 
     return () => element?.setAttribute("src", "");
   }, [id, wantStream, size]);
 
+  // Nothing has painted, so the box is black. Black on its own is indistinguishable from a
+  // camera pointed at a cave, from a drone that has crashed, and from a dashboard that is
+  // broken - so it says which it is.
+  const blank = !ready && !streaming;
+
   return (
     <div className={styles.feedBox} ref={box}>
-      {!ready && !streaming && (
-        <EmptyImage label={wantStream ? "Connecting to the feed" : "Waiting for the first frame"} />
+      {blank && <FeedWaiting id={id} live={live} detail={wantStream} />}
+      {/* A picture that has stopped arriving is worse than no picture: it is a stale picture
+          that looks current. The last frame stays - it is still the best information there is
+          about where that drone was - but it is dimmed and labelled. */}
+      {!blank && !live && (
+        <span className={styles.lostBanner}><i />Feed lost &middot; reconnecting</span>
       )}
       {/* eslint-disable-next-line @next/next/no-img-element -- frames are painted onto this by hand */}
       <img
         ref={still}
         className={styles.feedImage}
+        data-stale={!live}
         style={{ opacity: ready && !streaming ? 1 : 0 }}
         alt={`${id} camera`}
       />
@@ -349,12 +372,37 @@ function Feed({ id, mode, transport }: { id: string; mode: FeedMode; transport: 
         <img
           ref={stream}
           className={styles.feedImage}
+          data-stale={!live}
           style={{ opacity: streaming ? 1 : 0 }}
           src={streamUrl(id, profile, size)}
           alt={`${id} camera`}
           onLoad={() => setStreaming(true)}
         />
       )}
+    </div>
+  );
+}
+
+
+/**
+ * What a black tile says while there is nothing to show.
+ *
+ * Which of these is true matters, because the fixes are different: a drone the server has never
+ * heard from is a fleet problem, and a drone on the roster that has not yet rendered is just the
+ * agent warming up and needs nothing but a moment.
+ */
+function FeedWaiting({ id, live, detail }: { id: string; live: boolean; detail: boolean }) {
+  return (
+    <div className={styles.waiting}>
+      <span className={styles.waitingPulse} aria-hidden="true" />
+      <strong>{live ? "Waiting for the feed" : "No signal"}</strong>
+      <span>
+        {!live
+          ? `${id} is on the roster but not sending frames`
+          : detail
+            ? "Opening this drone’s own stream"
+            : `${id} has not rendered its first frame yet`}
+      </span>
     </div>
   );
 }

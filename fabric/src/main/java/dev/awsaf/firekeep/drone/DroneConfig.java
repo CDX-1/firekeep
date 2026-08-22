@@ -74,6 +74,10 @@ public final class DroneConfig {
     public final int hazardClearance;
     /** Height above ground a drone climbs to before crossing open terrain. */
     public final int cruiseAltitude;
+    /** Central flight envelope. Commands provide horizontal intent only; the controller owns Y. */
+    public final int minAltitudeAboveGround;
+    public final int maxAltitudeAboveGround;
+    public final int targetAltitudeAboveGround;
 
     // ---- actions
     public final int waterRadius;
@@ -118,6 +122,11 @@ public final class DroneConfig {
         this.pathSearchRadius = clamp(integer(flight, "pathSearchRadius", 48), 8, 192);
         this.hazardClearance = clamp(integer(flight, "hazardClearance", 2), 0, 8);
         this.cruiseAltitude = clamp(integer(flight, "cruiseAltitude", 4), 0, 64);
+        this.minAltitudeAboveGround = clamp(integer(flight, "minAltitudeAboveGround", 4), 1, 64);
+        this.maxAltitudeAboveGround = clamp(integer(flight, "maxAltitudeAboveGround", 12),
+                this.minAltitudeAboveGround, 96);
+        this.targetAltitudeAboveGround = clamp(integer(flight, "targetAltitudeAboveGround", 7),
+                this.minAltitudeAboveGround, this.maxAltitudeAboveGround);
 
         JsonObject actions = child(root, "actions");
         this.waterRadius = clamp(integer(actions, "waterRadius", 3), 1, 16);
@@ -222,6 +231,9 @@ public final class DroneConfig {
         flight.addProperty("pathSearchRadius", c.pathSearchRadius);
         flight.addProperty("hazardClearance", c.hazardClearance);
         flight.addProperty("cruiseAltitude", c.cruiseAltitude);
+        flight.addProperty("minAltitudeAboveGround", c.minAltitudeAboveGround);
+        flight.addProperty("maxAltitudeAboveGround", c.maxAltitudeAboveGround);
+        flight.addProperty("targetAltitudeAboveGround", c.targetAltitudeAboveGround);
         root.add("flight", flight);
 
         JsonObject actions = new JsonObject();

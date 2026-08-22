@@ -5,8 +5,8 @@ import styles from "./world-map.module.css";
 import { AREAS, type Area } from "./drones";
 import { getWorld, worldMapUrl } from "@/lib/api";
 import type { WorldMeta } from "@/lib/types";
-import { fallbackWorld } from "./fallback-world";
 import { areaOf } from "@/lib/cameras";
+import { ROLE_LIST, callsignOf, roleOf, type Role } from "@/lib/roles";
 import { LiveLayer } from "./live-layer";
 import { DIMENSION, getLive, liveMapUrl, sendDroneTo, spawnDrone, streamUrl,
          type LiveDelta, type LiveDrone, type LiveSnapshot } from "@/lib/live";
@@ -42,6 +42,15 @@ type Marker = {
   id: string;
   /** the quadrant it is actually over, so the rail groups by where drones really are */
   area: Area;
+  /**
+   * What it is up there to do, which is what it is drawn as.
+   *
+   * The markers used to be coloured by quadrant, which said something the map already says -
+   * the drone's position. Colouring by role says the thing the map cannot: that the two
+   * aircraft over the same fire are a surveyor and a suppression ship, and that nobody has
+   * sent a thermal.
+   */
+  role: Role;
   x: number;
   z: number;
   /** radians, already turned from the mod's degrees into screen space */
@@ -55,8 +64,8 @@ type Drag =
   | { kind: "pan"; pointer: number; fromX: number; fromY: number; viewX: number; viewY: number; moved: number }
   | { kind: "aim"; pointer: number; drone: string; fromX: number; fromY: number; toX: number; toY: number; moved: number };
 
-/** What we are drawing under the drones: either the real save, or a stand-in. */
-type Backdrop = { meta: WorldMeta; image: CanvasImageSource; real: boolean };
+/** The rendered Minecraft save under the live fleet overlay. */
+type Backdrop = { meta: WorldMeta; image: CanvasImageSource };
 
 /**
  * What the map is for right now.
@@ -69,6 +78,35 @@ export type MapMode = "drones" | "simulate";
 
 /** How the placement circle is aimed, so the render loop can read it without restarting. */
 type SimSettings = { mode: MapMode; tool: EventKind; radius: number; placing: boolean };
+
+/**
+ * A drone that has been asked for but has not turned up yet.
+ *
+ * Spawning is not immediate and never looked it: the POST only queues the order, the mod builds
+ * the drone on its next feed pull, and it reports it on the pull after that. That is a second or
+ * two of a map that has not changed, which reads exactly like a click that missed.
+ *
+ * So the click leaves something behind. It is not an optimistic drone - nothing pretends there is
+ * an aircraft there - it is a marker saying an order is outstanding, and it goes when the real
+ * drone lands on the feed, or turns into a failure when it never does.
+ */
+type Deployment = {
+  key: number;
+  x: number;
+  z: number;
+  /** when the order went out, for the timeout and for the age on the rail */
+  at: number;
+  state: "deploying" | "lost";
+};
+
+/** How long a spawn has to produce a drone before it is called a failure. */
+const DEPLOY_TIMEOUT_MS = 20_000;
+
+/** How long the failure stays on screen after that, so it is not missed. */
+const DEPLOY_LINGER_MS = 8_000;
+
+/** A new drone this far from where one was ordered is taken to be that order arriving. */
+const DEPLOY_RADIUS = 24;
 
 type WorldMapProps = {
   active: boolean;
@@ -89,6 +127,9 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
   const sessionRef = useRef<string>("");
   const liveRef = useRef<LiveDrone[]>([]);
   const eventsRef = useRef<SimEvent[]>([]);
+  const deployRef = useRef<Deployment[]>([]);
+  // Which drones the feed has already shown us, so a drone appearing is something we can notice.
+  const knownDrones = useRef<Set<string>>(new Set());
   const simRef = useRef<SimSettings>({ mode: "drones", tool: "fire", radius: 8, placing: false });
 
   const [feed, setFeed] = useState<LiveSnapshot | null>(null);
@@ -100,6 +141,7 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
   // armed by the Launch a drone button; the next click on the map puts one there, then disarms
   const [placing, setPlacing] = useState(false);
   const [cursor, setCursor] = useState<Vec | null>(null);
+  const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [zoom, setZoom] = useState(1);
   const [, setPulse] = useState(0);          // nudges the side rail to re-read the sim
 
@@ -114,15 +156,23 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
 
   const load = useCallback(async (refresh = false) => {
     setError(null);
-    try {
-      const meta = await getWorld();
-      const image = await loadImage(worldMapUrl() + (refresh ? `&refresh=1&t=${Date.now()}` : ""));
-      setBackdrop({ meta, image, real: true });
-    } catch (cause) {
-      // No server, or no save yet: draw a stand-in so the tab still works.
-      setError(cause instanceof Error ? cause.message : String(cause));
-      setBackdrop(fallbackWorld());
+    let failure: unknown;
+    // Minecraft can be saving its region files when the first request lands. Retry that short
+    // window rather than substituting a fictional map for the world the drones are actually in.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const meta = await getWorld();
+        const suffix = refresh || attempt > 0 ? `&refresh=1&t=${Date.now()}` : "";
+        const image = await loadImage(worldMapUrl() + suffix);
+        setBackdrop({ meta, image });
+        fittedRef.current = false;
+        return;
+      } catch (cause) {
+        failure = cause;
+        if (attempt < 2) await new Promise<void>((resolve) => window.setTimeout(resolve, 1200));
+      }
     }
+    setError(failure instanceof Error ? failure.message : String(failure));
     fittedRef.current = false;
   }, []);
 
@@ -199,6 +249,61 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
   }, []);
 
   useEffect(() => { liveRef.current = liveDrones; }, [liveDrones]);
+  useEffect(() => { deployRef.current = deployments; }, [deployments]);
+
+  /**
+   * Retires a deployment marker when the drone it was waiting for turns up.
+   *
+   * Matched by position rather than by name, because the dashboard does not get to choose the
+   * name - the mod does, on its own side, after the order has been queued. What we do know is
+   * where we asked for it, and a drone that has just appeared within a few blocks of that is the
+   * one we asked for.
+   */
+  useEffect(() => {
+    const arrived = liveDrones.filter((drone) => !knownDrones.current.has(drone.id));
+    knownDrones.current = new Set(liveDrones.map((drone) => drone.id));
+    if (arrived.length === 0) return;
+
+    setDeployments((current) => {
+      if (current.length === 0) return current;
+      const remaining = [...current];
+      for (const drone of arrived) {
+        let best = -1;
+        let bestDistance = DEPLOY_RADIUS;
+        remaining.forEach((deployment, index) => {
+          if (deployment.state !== "deploying") return;
+          const distance = Math.hypot(deployment.x - drone.x, deployment.z - drone.z);
+          if (distance <= bestDistance) {
+            best = index;
+            bestDistance = distance;
+          }
+        });
+        if (best >= 0) remaining.splice(best, 1);
+      }
+      return remaining.length === current.length ? current : remaining;
+    });
+  }, [liveDrones]);
+
+  // An order that never produced a drone says so rather than fading out as though it worked.
+  useEffect(() => {
+    if (deployments.length === 0) return;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      setDeployments((current) => {
+        const next = current
+          .map((deployment) => deployment.state === "deploying" && now - deployment.at > DEPLOY_TIMEOUT_MS
+            ? { ...deployment, state: "lost" as const }
+            : deployment)
+          .filter((deployment) => deployment.state === "deploying"
+            || now - deployment.at < DEPLOY_TIMEOUT_MS + DEPLOY_LINGER_MS);
+        return next.length === current.length
+          && next.every((item, index) => item.state === current[index].state)
+          ? current
+          : next;
+      });
+    }, 500);
+    return () => clearInterval(timer);
+  }, [deployments.length]);
   useEffect(() => { eventsRef.current = events; }, [events]);
   useEffect(() => { simRef.current = { mode, tool, radius, placing }; }, [mode, tool, radius, placing]);
 
@@ -288,6 +393,7 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
         drag: dragRef.current,
         layer: layerRef.current,
         events: eventsRef.current,
+        deployments: deployRef.current,
         sim: simRef.current,
         cursor: cursorRef.current,
         time,
@@ -403,13 +509,20 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
    * Puts a new drone where the map was clicked.
    *
    * Only x and z: the map is top-down, and the mod drops the drone just above the ground rather
-   * than guessing an altitude here. Nothing is drawn until the feed reports it, which is a
-   * second or so - the same wait as a simulated fire, and for the same reason.
+   * than guessing an altitude here. No drone is drawn until the feed reports it, which is a
+   * second or so - but a "deploying" marker goes down straight away, so the wait looks like a
+   * wait rather than like a click that did nothing.
    */
   const plop = useCallback((at: Vec) => {
     setPlacing(false);
     setOrderError(null);
-    void spawnDrone(Math.round(at.x), Math.round(at.z), DIMENSION)
+    const x = Math.round(at.x);
+    const z = Math.round(at.z);
+    void spawnDrone(x, z, DIMENSION)
+      // Only once the server has taken the order: a marker put down before that would sit there
+      // saying a drone is on its way next to an error saying it never left.
+      .then(() => setDeployments((current) => [...current,
+        { key: Date.now() + current.length, x, z, at: Date.now(), state: "deploying" }]))
       .catch((cause) => setOrderError(cause instanceof Error ? cause.message : String(cause)));
   }, []);
 
@@ -550,7 +663,7 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
         </div>
 
         <footer className={styles.status}>
-          <span className={styles.world} data-real={backdrop?.real ?? false}>
+          <span className={styles.world} data-real={Boolean(backdrop)}>
             {backdrop ? backdrop.meta.name : "loading world"}
           </span>
           {meta && <span>{meta.width}&times;{meta.height} blocks &middot; {meta.chunks} chunks</span>}
@@ -570,13 +683,10 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
         </footer>
 
         {!backdrop && <p className={styles.loading}>Reading the world off disk&hellip;</p>}
-        {error && backdrop && !backdrop.real && (
+        {error && !backdrop && (
           <p className={styles.notice}>
-            Showing a stand-in world, not the one the drones are in &mdash; {error}. Either
-            <code>python3 server.py</code> is not running, or it found no world to read: it
-            looks for the server&rsquo;s own world under <code>fabric/run</code>, then
-            <code>fabric/run/saves</code>. Point it with <code>--save</code> or
-            <code>FIREKEEP_SAVE</code>, then hit Reload.
+            The real Minecraft world could not be read yet &mdash; {error}. It will never show a
+            substitute map. Check that the hub can read the server save, then use Reload.
           </p>
         )}
       </div>
@@ -610,7 +720,33 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
         >
           {placing ? "Click the map to place it" : "Launch a drone"}
         </button>
-        {liveDrones.length === 0 && (
+        {deployments.length > 0 && (
+          <ul className={styles.deployList} aria-label="Drones being deployed">
+            {deployments.map((deployment) => (
+              <li key={deployment.key} data-state={deployment.state}>
+                <i />
+                <span>{deployment.state === "lost" ? "No drone arrived" : "Deploying drone"}</span>
+                <button type="button" className={styles.coords}
+                        onClick={() => centerOnPoint(deployment.x, deployment.z)}>
+                  {deployment.x}, {deployment.z}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {liveDrones.length > 0 && (
+          <div className={styles.legend} aria-label="Fleet composition">
+            {ROLE_LIST.map((role) => {
+              const count = liveDrones.filter((drone) => roleOf(drone.id).id === role.id).length;
+              if (count === 0) return null;
+              return <span key={role.id} style={{ "--role": role.color } as React.CSSProperties}
+                           title={`${count} x ${role.name} - ${role.tagline}`}>
+                <i />{role.code}<b>{count}</b>
+              </span>;
+            })}
+          </div>
+        )}
+        {liveDrones.length === 0 && deployments.length === 0 && (
           <p className={styles.empty}>
             {feed?.live
               ? "No drones in the world yet. Launch one on the map, or use /drone spawn."
@@ -626,21 +762,25 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
               <li key={area}>
                 <p className={styles.areaLabel}><i style={{ background: AREA_COLOR[area] }} />{area}</p>
                 <ul>
-                  {inArea.map((drone) => (
-                    <li key={drone.id}>
+                  {inArea.map((drone) => {
+                    const role = roleOf(drone.id);
+                    return <li key={drone.id}>
                       <button
                         type="button"
                         data-active={selected === drone.id}
+                        style={{ "--role": role.color } as React.CSSProperties}
+                        title={`${drone.id} - ${role.name}: ${role.tagline}`}
                         onClick={() => { setSelected(drone.id); centerOnPoint(drone.x, drone.z); }}
                       >
-                        <span>{drone.id}</span>
+                        <span className={styles.roleTag}>{role.code}</span>
+                        <span>{callsignOf(drone.id)}</span>
                         <span className={styles.coords}>
                           {Math.round(drone.x)}, {Math.round(drone.z)}
                         </span>
                         {drone.target && <span className={styles.transit} aria-label="in transit" />}
                       </button>
-                    </li>
-                  ))}
+                    </li>;
+                  })}
                 </ul>
               </li>
             );
@@ -649,7 +789,8 @@ export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProp
         <footer>
           {selectedLive ? (
             <>
-              <p>{selectedLive.id}</p>
+              <p>{callsignOf(selectedLive.id)} <em className={styles.roleName}>{roleOf(selectedLive.id).name}</em></p>
+              <p className={styles.coords}>{selectedLive.id} &middot; {roleOf(selectedLive.id).tagline.toLowerCase()}</p>
               <p className={styles.coords}>
                 {selectedLive.target
                   ? `flying to ${Math.round(selectedLive.target[0])}, ${Math.round(selectedLive.target[2])}`
@@ -691,6 +832,7 @@ function syncMarkers(markers: Marker[], live: LiveDrone[], dt: number) {
 
   for (const drone of live) {
     const area = areaOf(drone);
+    const role = roleOf(drone.id);
     // Minecraft yaw is degrees with 0 facing +Z, so forward is (-sin, cos). drawDrone turns the
     // marker by yaw + 90 degrees and its nose starts pointing screen-up, which lands the nose on
     // that forward vector only with +90 here - with -90 every drone was drawn facing backwards.
@@ -699,11 +841,12 @@ function syncMarkers(markers: Marker[], live: LiveDrone[], dt: number) {
 
     const marker = existing.get(drone.id);
     if (!marker) {
-      next.push({ id: drone.id, area, x: drone.x, z: drone.z, yaw, target });
+      next.push({ id: drone.id, area, role, x: drone.x, z: drone.z, yaw, target });
       continue;
     }
 
     marker.area = area;
+    marker.role = role;
     marker.target = target;
     marker.x += (drone.x - marker.x) * chase;
     marker.z += (drone.z - marker.z) * chase;
@@ -726,6 +869,8 @@ type Overlay = {
   drag: Drag | null;
   layer: LiveLayer | null;
   events: SimEvent[];
+  /** spawns that have been ordered and not yet arrived */
+  deployments: Deployment[];
   sim: SimSettings;
   /** where the pointer is on the canvas, for the placement circle */
   cursor: { x: number; y: number } | null;
@@ -794,13 +939,18 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
     drawNewDrone(ctx, overlay.cursor, overlay.time);
   }
 
+  // Orders that have gone out and not yet produced an aircraft.
+  for (const deployment of overlay.deployments) {
+    drawDeploying(ctx, toScreenX(deployment.x), toScreenY(deployment.z), deployment, overlay.time);
+  }
+
   // drag arrow first, so markers sit on top of it
   const aim = overlay.drag?.kind === "aim" ? overlay.drag : null;
   if (aim && aim.moved > DRAG_SLOP) {
     const marker = markers.find((m) => m.id === aim.drone);
     if (marker) {
       const blocks = Math.hypot(aim.toX - toScreenX(marker.x), aim.toY - toScreenY(marker.z)) / view.scale;
-      drawArrow(ctx, toScreenX(marker.x), toScreenY(marker.z), aim.toX, aim.toY, AREA_COLOR[marker.area], blocks);
+      drawArrow(ctx, toScreenX(marker.x), toScreenY(marker.z), aim.toX, aim.toY, marker.role.color, blocks);
     }
   }
 
@@ -809,11 +959,11 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
     const y = toScreenY(marker.z);
     if (x < -60 || y < -60 || x > width + 60 || y > height + 60) continue;
 
-    const color = AREA_COLOR[marker.area];
+    const color = marker.role.color;
     if (marker.target) {
       drawRoute(ctx, x, y, toScreenX(marker.target.x), toScreenY(marker.target.z), color);
     }
-    drawDrone(ctx, x, y, { name: marker.id, yaw: marker.yaw }, color, {
+    drawDrone(ctx, x, y, { name: callsignOf(marker.id), yaw: marker.yaw, role: marker.role }, color, {
       selected: overlay.selected === marker.id,
       hovered: overlay.hovered === marker.id,
       labelled: true,
@@ -905,7 +1055,7 @@ function drawPlacement(ctx: CanvasRenderingContext2D, cursor: { x: number; y: nu
 function drawNewDrone(ctx: CanvasRenderingContext2D, cursor: { x: number; y: number }, time: number) {
   ctx.save();
   ctx.globalAlpha = 0.55 + 0.2 * Math.sin(time / 260);
-  drawDrone(ctx, cursor.x, cursor.y, { name: "", yaw: 0 }, "#e6e2d8",
+  drawDrone(ctx, cursor.x, cursor.y, { name: "", yaw: 0, role: null }, "#e6e2d8",
     { selected: false, hovered: true, labelled: false });
 
   ctx.globalAlpha = 0.9;
@@ -918,6 +1068,58 @@ function drawNewDrone(ctx: CanvasRenderingContext2D, cursor: { x: number; y: num
   ctx.restore();
 
   label(ctx, "New drone", cursor.x, cursor.y + 22);
+}
+
+
+/**
+ * An outstanding spawn order.
+ *
+ * A dashed ring closing inwards while it waits, because the wait has a length and a ring that
+ * only pulses does not say whether it is two seconds in or twenty. When it runs out the mark
+ * goes red and says so rather than quietly disappearing, which would be indistinguishable from
+ * a drone that arrived somewhere off screen.
+ */
+function drawDeploying(ctx: CanvasRenderingContext2D, x: number, y: number,
+                       deployment: Deployment, time: number) {
+  const lost = deployment.state === "lost";
+  const color = lost ? "#e2604a" : "#8fb8ae";
+  const progress = Math.min(1, (Date.now() - deployment.at) / DEPLOY_TIMEOUT_MS);
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.4;
+  ctx.globalAlpha = lost ? .95 : .55 + .3 * Math.sin(time / 240);
+
+  // the outer ring, closing as the wait runs down
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.arc(0, 0, 15, 0, Math.PI * 2);
+  ctx.stroke();
+
+  if (!lost) {
+    ctx.setLineDash([]);
+    ctx.globalAlpha = .9;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 15, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // a landing cross under it, so the point being deployed to is unambiguous
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(-6, 0);
+  ctx.lineTo(6, 0);
+  ctx.moveTo(0, -6);
+  ctx.lineTo(0, 6);
+  ctx.stroke();
+  ctx.restore();
+
+  label(ctx, lost ? "No drone arrived" : "Deploying drone", x, y + 21);
 }
 
 /**
@@ -981,7 +1183,7 @@ function drawDrone(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  drone: { name: string; yaw: number },
+  drone: { name: string; yaw: number; role: Role | null },
   color: string,
   state: { selected: boolean; hovered: boolean; labelled: boolean },
 ) {
@@ -999,6 +1201,8 @@ function drawDrone(
   }
 
   ctx.rotate(drone.yaw + Math.PI / 2);
+
+  if (drone.role) drawRoleGlyph(ctx, drone.role, radius, color);
 
   // four rotors on stubby arms, seen from directly above
   ctx.strokeStyle = "rgba(8, 10, 9, .75)";
@@ -1039,6 +1243,82 @@ function drawDrone(
   if (state.labelled) {
     label(ctx, drone.name, x, y + radius + 6);
   }
+}
+
+
+/**
+ * The mark that says what an aircraft is, drawn around it and turned with it.
+ *
+ * Colour alone is not enough on a map that is already every colour terrain comes in - and it is
+ * no help at all to somebody who cannot separate the olive from the amber. Each role gets a
+ * shape as well: a forward wedge for the surveyor's sweep, a heat halo for the thermal ship, a
+ * drop bracket under the suppression ship, arcs off a relay, and a search ring for SAR.
+ *
+ * Drawn inside the marker's own rotation, so the surveyor's wedge points where it is looking.
+ */
+function drawRoleGlyph(ctx: CanvasRenderingContext2D, role: Role, radius: number, color: string) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.1;
+  ctx.globalAlpha = .55;
+
+  switch (role.id) {
+    case "survey": {
+      // the swathe under the camera, opening away from the nose
+      const reach = radius + 15;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, reach, -Math.PI / 2 - 0.5, -Math.PI / 2 + 0.5);
+      ctx.closePath();
+      ctx.globalAlpha = .18;
+      ctx.fill();
+      ctx.globalAlpha = .6;
+      ctx.stroke();
+      break;
+    }
+    case "thermal": {
+      ctx.setLineDash([2, 3]);
+      for (const scale of [1.55, 2.1]) {
+        ctx.beginPath();
+        ctx.arc(0, 0, radius * scale, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      break;
+    }
+    case "suppress": {
+      // the bracket the load would fall through
+      const drop = radius + 12;
+      ctx.beginPath();
+      ctx.moveTo(-6, drop - 5);
+      ctx.lineTo(-6, drop);
+      ctx.lineTo(6, drop);
+      ctx.lineTo(6, drop - 5);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, radius + 2);
+      ctx.lineTo(0, drop - 2);
+      ctx.stroke();
+      break;
+    }
+    case "relay": {
+      for (const scale of [1.5, 2, 2.5]) {
+        ctx.beginPath();
+        ctx.arc(0, 0, radius * scale, -Math.PI * 0.85, -Math.PI * 0.15);
+        ctx.stroke();
+      }
+      break;
+    }
+    case "rescue": {
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.arc(0, 0, radius + 8, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    }
+  }
+
+  ctx.restore();
 }
 
 /** The dashed line a drone is currently following, with a crosshair on the target. */

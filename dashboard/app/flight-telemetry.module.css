@@ -1,7 +1,8 @@
 .telemetry { position: absolute; inset: 0; z-index: 1; color: #e7ebe2; font-family: "IBM Plex Mono", "JetBrains Mono", ui-monospace, monospace; font-size: 9px; font-variant-numeric: tabular-nums; pointer-events: none; }
-/* Flight controls own the top edge; telemetry stays out of their way. */
+/* Flight controls own the top edge and the head-up display owns both strips; telemetry stays
+   inside what is left. */
 .header, .systems { display: none; }
-.primaryReadings { position: absolute; bottom: 34px; left: 12px; display: grid; grid-template-columns: repeat(2, 86px); width: fit-content; background: rgba(8, 9, 8, .42); border: 1px solid rgba(225, 230, 220, .16); opacity: .78; }
+.primaryReadings { position: absolute; bottom: 46px; left: 12px; display: grid; grid-template-columns: repeat(2, 92px); width: fit-content; background: rgba(8, 9, 8, .42); border: 1px solid rgba(225, 230, 220, .16); border-left: 2px solid var(--role, #8fb8ae); opacity: .82; }
 .primaryReadings .reading { min-height: 38px; padding: 5px 7px; border-right: 1px solid rgba(225, 230, 220, .13); border-bottom: 1px solid rgba(225, 230, 220, .13); }
 .primaryReadings .reading:nth-child(2n) { border-right: 0; }
 .primaryReadings .reading:nth-last-child(-n + 2) { border-bottom: 0; }
@@ -10,11 +11,11 @@
 .reading strong { color: #f5f7f1; font-size: 12px; font-weight: 500; letter-spacing: -.045em; }
 .reading em, .traceHeading em { margin-left: 3px; color: #c3c9c0; font-size: .58em; font-style: normal; letter-spacing: 0; }
 .reading[data-warning="true"] strong { color: #ffb800; }
-.route { position: absolute; top: 41px; left: 12px; width: min(110px, 19%); aspect-ratio: 1; overflow: visible; opacity: .56; }
+.route { position: absolute; top: 52px; left: 12px; width: min(110px, 19%); aspect-ratio: 1; overflow: visible; opacity: .56; }
 .routeLine { fill: none; stroke: #c6ff4a; stroke-width: 1.4; vector-effect: non-scaling-stroke; }
 .routeStop { fill: #0b0c0a; stroke: #d7ddce; stroke-width: 1.1; vector-effect: non-scaling-stroke; }
 .routeCurrent { fill: #ffb800; stroke: #0b0c0a; stroke-width: 1.1; vector-effect: non-scaling-stroke; }
-.traces { position: absolute; top: 43px; right: 12px; display: grid; width: min(190px, 31%); gap: 6px; opacity: .68; }
+.traces { position: absolute; top: 52px; right: 12px; display: grid; width: min(190px, 31%); gap: 6px; opacity: .68; }
 .trace { padding: 6px 7px 4px; background: rgba(8, 9, 8, .36); border: 1px solid rgba(225, 230, 220, .13); }
 .traceHeading { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 2px; }
 .traceHeading > span { color: #d3d8cf; font-size: 8px; }
@@ -27,11 +28,11 @@
 .traceTime { display: flex; justify-content: space-between; margin-top: 2px; color: #bdc3b9; font-size: 7px; }
 
 @media (max-width: 720px) {
-  .primaryReadings { bottom: 30px; left: 8px; grid-template-columns: repeat(2, 72px); }
+  .primaryReadings { bottom: 38px; left: 8px; grid-template-columns: repeat(2, 76px); }
   .primaryReadings .reading { min-height: 32px; padding: 4px 5px; }
   .reading strong { font-size: 10px; }
-  .route { top: 36px; left: 8px; width: min(76px, 21%); }
-  .traces { top: 37px; right: 8px; width: min(152px, 43%); gap: 4px; }
+  .route { top: 42px; left: 8px; width: min(76px, 21%); }
+  .traces { top: 42px; right: 8px; width: min(152px, 43%); gap: 4px; }
   .trace { padding: 4px 5px 3px; }
   .trace svg { height: 20px; }
   .traceTime { display: none; }

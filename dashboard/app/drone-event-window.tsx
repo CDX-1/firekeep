@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import styles from "./drone-event-window.module.css";
 import { getDroneEvents, type DroneFeedEvent } from "@/lib/drone-events";
 
-const REFRESH_MS = 2_500;
+// The mod's incident event is written locally before n8n has responded. Keep this lightweight
+// per-drone read brisk enough that the camera HUD behaves like a live alert, not a reload-only log.
+const REFRESH_MS = 750;
 
 /** Recent workflow observations, layered over the camera rather than competing with it. */
 export default function DroneEventWindow({ droneId, compact = false }: { droneId: string; compact?: boolean }) {

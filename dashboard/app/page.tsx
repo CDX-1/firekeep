@@ -105,7 +105,7 @@ export default function Dashboard() {
         aria-labelledby="tab-predictions"
         hidden={tab !== "predictions"}
       >
-        <RiskMap active={tab === "predictions"} />
+        <RiskMap active={tab === "predictions"} onOpenDroneFeed={openDroneFeed} />
       </div>
 
       <div

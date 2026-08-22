@@ -9,36 +9,13 @@ import type { DroneCamera, DroneArea } from "./types";
  * that already owns the world feed and the map, it holds one upstream connection per drone
  * however many dashboards are open, and keeping the game's addresses on one side of the wall
  * means a phone on the LAN needs to reach this app and nothing else.
+ *
+ * The server still serves the roster at `/api/cameras` and single frames at `<id>/frame.jpg`.
+ * The dashboard no longer asks for either: everything on the page comes down the one feed.
  */
 const BASE = "/backend/api/cameras";
 
-/**
- * How often the roster is re-read while the page is polling.
- *
- * Only used by the fallback: in streaming mode the roster arrives on the feed as it changes,
- * which is both fresher and free.
- */
-export const ROSTER_INTERVAL_MS = 1000;
-
-/**
- * The roster rate while somebody is flying a drone by hand, polling.
- *
- * Each order aims a step ahead of where the drone is, so how fresh that position is decides how
- * smoothly a held key flies. Once a second is fine for a wall of thumbnails and much too coarse
- * for flying. Streaming has no equivalent knob: the server merges the mod's own position feed
- * into the roster, so positions already arrive about five times a second.
- */
-export const ROSTER_CONTROL_INTERVAL_MS = 250;
-
-/**
- * How long a grid tile waits after painting before asking for another frame, polling.
- *
- * A courtesy gap, not the real limit: how fast tiles actually refresh is set by the shared
- * queue in lib/frames, which is what keeps a wall of them from starving each other.
- */
-export const TILE_INTERVAL_MS = 150;
-
-/** What the server serves at /api/cameras, and pushes down the feed as it changes. */
+/** What the server pushes down the feed as it changes. */
 export interface Roster {
   drones: DroneCamera[];
   /** The slowest agent's frame rate, which is the one worth worrying about. */
@@ -48,13 +25,6 @@ export interface Roster {
   online: boolean;
   watchers: number;
   revision: number;
-}
-
-/** The roster, once. The streaming path gets the same shape pushed to it instead. */
-export async function getRoster(signal?: AbortSignal): Promise<Roster> {
-  const res = await fetch(BASE, { cache: "no-store", signal });
-  if (!res.ok) throw new Error(`/api/cameras -> ${res.status}`);
-  return res.json() as Promise<Roster>;
 }
 
 /** Every camera on the page down one connection: the roster, and the frames it asks for. */
@@ -109,15 +79,11 @@ function query(profile?: Profile, size?: Size) {
 /**
  * MJPEG for one drone, for an `<img>` that should stay live.
  *
- * The feed carries the same frames without costing a connection, so this is for the picture
- * somebody has actually singled out and for the polling fallback - not for a wall of tiles.
+ * The feed carries the same frames without costing a connection, so this is only for the picture
+ * somebody has actually singled out - not for a wall of tiles.
  */
 export const streamUrl = (id: string, profile?: Profile, size?: Size) =>
   `${BASE}/${encodeURIComponent(id)}/stream${query(profile, size)}`;
-
-/** The newest single frame. `tick` busts the cache; without it the browser reuses the first. */
-export const snapshotUrl = (id: string, tick: number, profile?: Profile) =>
-  `${BASE}/${encodeURIComponent(id)}/frame.jpg?t=${tick}${profile === "detail" ? "&profile=detail" : ""}`;
 
 /**
  * Which quarter of the world a drone is flying over, measured from the world origin - in

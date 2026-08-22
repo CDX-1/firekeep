@@ -22,20 +22,19 @@ const BOUNDARY = "--firekeepfeed";
 /** How long a subscription change waits for others before it costs a reconnect. */
 const SETTLE_MS = 120;
 
-/** Reconnect backoff after a dropped stream, doubling to the cap. */
+/**
+ * Reconnect backoff after a dropped stream, doubling to the cap.
+ *
+ * It never stops trying. There was once a give-up count, after which the page went back to
+ * fetching stills one at a time; with that gone there is nothing better to do than keep asking,
+ * and a server that is restarting - which is the usual reason for a drop - comes back on its own
+ * a few seconds later. The status says `retrying` throughout, so a stream that will genuinely
+ * never open still says so on screen rather than pretending to connect.
+ */
 const RETRY_MS = 500;
 const RETRY_CAP_MS = 5_000;
 
-/**
- * Consecutive failures before the page is told to fall back to polling.
- *
- * A stream that drops once is a restarting server and will be back; one that will not open at
- * all is usually something between us and it that does not pass streaming responses, and no
- * amount of retrying fixes that - so the tiles should go back to asking for stills instead.
- */
-const GIVE_UP_AFTER = 3;
-
-export type Connection = "connecting" | "live" | "retrying" | "failed";
+export type Connection = "connecting" | "live" | "retrying";
 
 export interface FeedStatus {
   connection: Connection;
@@ -121,7 +120,7 @@ class CameraFeed {
     this.connect();
   }
 
-  /** Drops the connection - used when the page switches to polling. */
+  /** Drops the connection. The page does this when it goes away, and not otherwise. */
   close() {
     if (this.settle) clearTimeout(this.settle);
     if (this.retry) clearTimeout(this.retry);
@@ -129,12 +128,6 @@ class CameraFeed {
     this.controller?.abort();
     this.controller = null;
     this.connected = "";
-  }
-
-  /** Forgets a previous give-up, so "try streaming again" actually tries. */
-  reset() {
-    this.failures = 0;
-    this.retryDelay = RETRY_MS;
   }
 
   // -- the connection ------------------------------------------------------
@@ -155,7 +148,6 @@ class CameraFeed {
     this.settle = setTimeout(() => {
       this.settle = null;
       if (this.ids().join(",") === this.connected) return;
-      if (this.status.connection === "failed") return;
       this.controller?.abort();
       this.controller = null;
       if (this.retry) {
@@ -194,11 +186,6 @@ class CameraFeed {
     this.connected = "";
     this.failures += 1;
     const error = cause instanceof Error ? cause.message : String(cause);
-
-    if (this.failures >= GIVE_UP_AFTER) {
-      this.publishStatus({ connection: "failed", error });
-      return;
-    }
 
     this.publishStatus({ connection: "retrying", error });
     this.retry = setTimeout(() => {

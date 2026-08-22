@@ -16,12 +16,14 @@ import {
   GRID_ROWS,
   MAX_RISK,
   baselineGrid,
+  cellOf,
   emptyGrid,
   gridToRows,
   rowsToGrid,
   type RiskCell,
   type RiskReport,
 } from "@/lib/risk";
+import { ROLE_IDS, ROLES, callsignOf, roleOf } from "@/lib/roles";
 import type { SimEvent } from "@/lib/events";
 import type { LiveSnapshot } from "@/lib/live";
 
@@ -83,6 +85,7 @@ The baseline already knows where fire IS. Your job is to predict where it is GOI
 - A cell that has already burned out has little left to burn - it should cool, not stay extreme.
 - Isolated single ignitions rarely become fronts. Clusters do.
 - Cells with drones on station are observed, not safer. Do not lower risk for drone presence.
+- The fleet is split into roles: ${ROLE_IDS.map((id) => `${ROLES[id].code} ${ROLES[id].name} (${ROLES[id].tagline})`).join("; ")}. Coverage is about the right aircraft, not the count - a high cell watched only by a surveyor has nobody who can act on it. Mention that in the briefing when it is true; never change a risk score because of it.
 - Cells with no fire anywhere near them and no recent events are genuinely low. Do not spread fear evenly across the map.
 
 Risk is an integer 1 to ${MAX_RISK}: 1 low, 2 guarded, 3 moderate, 4 high, 5 extreme.
@@ -108,6 +111,26 @@ function describeObservations(cells: RiskCell[][], live: LiveSnapshot | null, ev
     );
   }
 
+  // Which aircraft are over which cell, so "on station" can mean something more than a count.
+  const stationed = new Map<string, string[]>();
+  for (const drone of live?.drones ?? []) {
+    const at = live ? cellOf(drone.x, drone.z, live) : null;
+    if (!at) continue;
+    const key = `${at.col},${at.row}`;
+    const list = stationed.get(key) ?? [];
+    list.push(`${callsignOf(drone.id)} ${roleOf(drone.id).code}`);
+    stationed.set(key, list);
+  }
+
+  const fleet = live?.drones ?? [];
+  if (fleet.length > 0) {
+    const byRole = ROLE_IDS
+      .map((id) => ({ role: ROLES[id], count: fleet.filter((d) => roleOf(d.id).id === id).length }))
+      .filter((entry) => entry.count > 0)
+      .map((entry) => `${entry.count} ${entry.role.code}`);
+    lines.push(`Fleet in the air: ${fleet.length} aircraft - ${byRole.join(", ")}.`);
+  }
+
   const active = cells.flat().filter((c) => c.fires > 0 || c.events > 0 || c.drones > 0);
   if (active.length === 0) {
     lines.push("No fires, no recent events, no drones over the mapped area.");
@@ -117,7 +140,9 @@ function describeObservations(cells: RiskCell[][], live: LiveSnapshot | null, ev
       const parts: string[] = [];
       if (c.fires) parts.push(`${c.fires} burning columns`);
       if (c.events) parts.push(`${c.events} recent events`);
-      if (c.drones) parts.push(`${c.drones} drone(s) on station`);
+      const crews = stationed.get(`${c.col},${c.row}`);
+      if (crews?.length) parts.push(`on station: ${crews.join(", ")}`);
+      else if (c.drones) parts.push(`${c.drones} drone(s) on station`);
       lines.push(`  (${c.col},${c.row}): ${parts.join(", ")}`);
     }
   }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import styles from "./drone-controls.module.css";
 import { sendDroneFly, sendDroneHover, sendDroneLook } from "@/lib/live";
+import { DEFAULT_PITCH, rememberPitch } from "@/lib/camera-view";
 import type { DroneCamera } from "@/lib/types";
 
 /**
@@ -55,7 +56,7 @@ export default function DroneControls({
   const [error, setError] = useState<string | null>(null);
   const [flying, setFlying] = useState(false);
   const [held, setHeld] = useState<string[]>([]);
-  const [pitch, setPitch] = useState(25);
+  const [pitch, setPitch] = useState(DEFAULT_PITCH);
 
   const id = useRef(drone.id);
   id.current = drone.id;
@@ -121,6 +122,9 @@ export default function DroneControls({
 
   const setCameraPitch = useCallback((next: number) => {
     setPitch(next);
+    // Nothing reports the camera's tilt back, so the instrument layer aims with what we asked
+    // for. Told here rather than when the order lands, so the sight moves with the slider.
+    rememberPitch(id.current, next);
     if (pitchTimer.current !== null) clearTimeout(pitchTimer.current);
     pitchTimer.current = setTimeout(() => {
       pitchTimer.current = null;

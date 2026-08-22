@@ -15,22 +15,28 @@
 .droneList { padding: 2px 0 6px; }
 .droneList button { display: flex; align-items: center; gap: 7px; width: 100%; padding: 5px 13px 5px 21px; color: var(--muted); background: transparent; border: 0; font: inherit; font-size: 11px; text-align: left; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 .droneList button svg { width: 13px; height: 13px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.35; }
-.droneList button i { width: 4px; height: 4px; flex: 0 0 auto; border-radius: 50%; background: transparent; }
+.droneList button i { width: 4px; height: 4px; flex: 0 0 auto; border-radius: 50%; background: var(--role, transparent); opacity: .75; }
+.droneName { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
+/* The role, in the aircraft's own colour: the sidebar is where you pick who to send. */
+.roleTag { flex: 0 0 auto; padding: 1px 4px; color: var(--role, var(--muted)); border: 1px solid color-mix(in srgb, var(--role, var(--muted)) 45%, transparent); border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; letter-spacing: .06em; }
 .droneList button[data-active="true"] { color: var(--text); background: rgba(255, 255, 255, .055); border-radius: 5px; }
-.droneList button[data-active="true"] i { background: var(--warm); box-shadow: 0 0 0 3px rgba(208, 160, 106, .11); }
+.droneList button[data-active="true"] i { opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--role, var(--warm)) 18%, transparent); }
+.droneList button[data-active="true"] .roleTag { color: #0d100e; background: var(--role, var(--warm)); border-color: transparent; }
 .droneList button:hover { color: var(--text); background: rgba(255, 255, 255, .025); }
 
-.transport { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; padding: 10px 13px 12px; border-top: 1px solid var(--line); }
-.transportState { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; letter-spacing: .01em; }
-.transportState i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
-.transportState[data-state="live"] i { background: var(--accent); box-shadow: 0 0 0 3px rgba(143, 184, 174, .13); }
-.transportState[data-state="connecting"] i, .transportState[data-state="retrying"] i { background: var(--warm); }
-.transportState[data-state="failed"] i { background: #b4645a; }
-.transportChoice { display: flex; gap: 2px; padding: 2px; background: rgba(255, 255, 255, .035); border-radius: 5px; }
-.transportChoice button { flex: 1; padding: 4px 0; color: var(--muted); background: transparent; border: 0; border-radius: 4px; font: inherit; font-size: 10px; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
-.transportChoice button:hover { color: var(--text); }
-.transportChoice button[data-active="true"] { color: #cae0da; background: var(--accent-soft); }
-.transportChoice button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
+/* What is in the air, by role - a legend for every colour used on the map and the feeds. */
+.composition { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; padding: 10px 13px 0; border-top: 1px solid var(--line); }
+.compositionRole { display: flex; align-items: center; gap: 4px; padding: 2px 5px; color: var(--role); background: color-mix(in srgb, var(--role) 12%, transparent); border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; letter-spacing: .05em; }
+.compositionRole i { width: 4px; height: 4px; border-radius: 50%; background: var(--role); }
+.compositionRole b { color: #eef2ee; font-weight: 600; }
+
+.feedStatus { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; padding: 10px 13px 12px; border-top: 1px solid var(--line); }
+.feedStatusLine { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; letter-spacing: .01em; }
+.feedStatusLine i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
+.feedStatusLine[data-state="live"] i { background: var(--accent); box-shadow: 0 0 0 3px rgba(143, 184, 174, .13); }
+.feedStatusLine[data-state="connecting"] i, .feedStatusLine[data-state="retrying"] i { background: var(--warm); }
+.feedStatusLine[data-state="retrying"] i { animation: retryPulse 1.1s ease-in-out infinite; }
+@keyframes retryPulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 
 .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; min-height: 0; overflow-y: auto; align-content: start; padding: 2px 8px 12px 2px; }
 .grid[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -51,10 +57,28 @@
  * over from the stills cannot reflow the grid - and so the box has a real width on the first
  * render, which is what the feed measures to decide what resolution to ask for.
  */
-.feedBox { position: relative; display: block; width: 100%; height: 100%; aspect-ratio: 16 / 9; overflow: hidden; }
-.feedImage { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transition: opacity 120ms ease; }
+.feedBox { container-type: inline-size; position: relative; display: block; width: 100%; height: 100%; aspect-ratio: 16 / 9; overflow: hidden; }
+.feedImage { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transition: opacity 120ms ease, filter 300ms ease; }
+/* A frozen picture is dimmed so it cannot be mistaken for a live one at a glance. */
+.feedImage[data-stale="true"] { filter: grayscale(.55) brightness(.62); }
+
+/*
+ * The black tile, explained.
+ *
+ * Centred and quiet: it is on screen at the least interesting moment - before anything has
+ * happened - and it must not look like an error when it is only a wait.
+ */
+.waiting { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 12px; color: var(--muted); text-align: balance; text-align: center; }
+.waiting strong { color: #d3dad5; font-size: clamp(10px, 1.5cqw, 12px); font-weight: 500; letter-spacing: .01em; }
+.waiting > span:last-child { max-width: 30ch; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9.5px; line-height: 1.4; opacity: .8; }
+.waitingPulse { width: 22px; height: 22px; margin-bottom: 3px; border: 1px solid var(--accent); border-radius: 50%; animation: waitingPulse 1.6s ease-out infinite; }
+@keyframes waitingPulse { 0% { transform: scale(.55); opacity: .9; } 100% { transform: scale(1.15); opacity: 0; } }
+
+/* A picture that has stopped arriving, said plainly over the last frame of it. */
+.lostBanner { position: absolute; top: 50%; left: 50%; z-index: 2; display: flex; align-items: center; gap: 6px; padding: 5px 10px; transform: translate(-50%, -50%); color: #f0c4bc; background: rgba(10, 12, 11, .82); border: 1px solid rgba(226, 96, 74, .5); border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; letter-spacing: .02em; white-space: nowrap; pointer-events: none; }
+.lostBanner i { width: 5px; height: 5px; border-radius: 50%; background: #e2604a; animation: deployPulse 1.2s ease-in-out infinite; }
+@keyframes deployPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 .notice { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
-.feedLabel { position: absolute; right: 0; bottom: 0; left: 0; z-index: 1; display: flex; align-items: center; padding: 8px 10px; color: #d1d5d0; background: linear-gradient(90deg, rgba(10, 11, 10, .83), rgba(10, 11, 10, .62)); font-size: 10px; letter-spacing: .01em; line-height: 1; text-align: left; pointer-events: none; }
 
 .overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 36px 64px; background: rgba(5, 7, 6, .9); animation: overlayIn 120ms ease-out both; }
 .viewer { display: grid; grid-template-columns: 46px minmax(0, min(84vw, calc(177.778dvh - 173px))) 46px; align-items: center; gap: 22px; width: fit-content; max-width: 100%; }
@@ -62,10 +86,6 @@
 /* Nothing under the picture any more: the controls are on it, so the panel is the feed. */
 .viewerPanel { position: relative; overflow: hidden; outline: 1px solid rgba(255, 255, 255, .2); outline-offset: -1px; border-radius: 9px; background: var(--image-bg); box-shadow: 0 24px 80px rgba(0, 0, 0, .4); animation: panelReveal 140ms ease-out both; }
 
-/* Where it is and what it is being rendered at, sat along the bottom of the frame. */
-.readout { position: absolute; right: 0; bottom: 0; left: 0; z-index: 2; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 8px 11px; color: #c9d2cd; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1; text-shadow: 0 1px 3px rgba(0, 0, 0, .85); pointer-events: none; }
-.readout b { padding: 2px 7px; border-radius: 4px; background: rgba(12, 15, 13, .6); font-weight: 400; letter-spacing: .02em; }
-.readout b[data-detail="true"] { color: #d9efe8; background: rgba(58, 96, 86, .8); }
 .viewerArrow { width: 46px; height: 46px; display: grid; place-items: center; padding: 0; color: var(--text); background: rgba(30, 34, 32, .95); border: 1px solid transparent; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 50%; cursor: pointer; transition: color 100ms ease, outline-color 100ms ease, background-color 100ms ease, transform 100ms ease; }
 .viewerArrow:hover { color: #d6ebe5; outline-color: var(--accent); background: rgba(43, 54, 50, .96); }
 .viewerArrow:active { transform: scale(.93); }

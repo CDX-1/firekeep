@@ -5,6 +5,7 @@ import dev.awsaf.firekeep.entity.DroneEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
@@ -147,7 +148,7 @@ public final class DroneController {
         // n8n workflow must be able to tilt the camera down while a move, patrol or follow is
         // still under way, rather than replacing that active command.
         if (command.type() == CommandType.LOOK) {
-            look(drone, command);
+            look(level, drone, command);
             return;
         }
 
@@ -194,7 +195,7 @@ public final class DroneController {
                 this.scanPending = true;
             }
             case DISPENSE_WATER -> dispense(level, drone, command);
-            case LOOK -> look(drone, command); // handled above; retained for exhaustive dispatch
+            case LOOK -> look(level, drone, command); // handled above; retained for exhaustive dispatch
             case SET_SPEED -> {
                 drone.setMaxSpeed(command.speed() / 20.0D);
                 finish(CommandResult.completed(command, "speed set to " + command.speed() + " blocks/s"));
@@ -217,9 +218,6 @@ public final class DroneController {
     private void beginMove(ServerLevel level, DroneEntity drone, DroneCommand command) {
         Vec3 step = command.direction().vector().scale(command.distance());
         Vec3 destination = drone.position().add(step);
-        if (!Double.isNaN(command.altitude())) {
-            destination = new Vec3(destination.x, command.altitude(), destination.z);
-        }
         travel(level, drone, destination, DroneStatus.MOVING);
     }
 
@@ -261,9 +259,14 @@ public final class DroneController {
         finish(CommandResult.completed(command, "extinguished " + drop.extinguished() + " fire blocks", data));
     }
 
-    private void look(DroneEntity drone, DroneCommand command) {
+    private void look(ServerLevel level, DroneEntity drone, DroneCommand command) {
         Vec3 at = command.lookAt();
         if (at != null) {
+            // A focus target is horizontal intent just like a flight target. Resolve its height
+            // from the world here so workflows never choose a drone's Y coordinate.
+            int ground = level.getHeight(Heightmap.Types.MOTION_BLOCKING,
+                    net.minecraft.util.Mth.floor(at.x), net.minecraft.util.Mth.floor(at.z)) - 1;
+            at = new Vec3(at.x, ground, at.z);
             Vec3 delta = at.subtract(drone.position());
             double horizontal = Math.sqrt(delta.x * delta.x + delta.z * delta.z);
             drone.setYawFollowsMotion(false);
@@ -465,7 +468,7 @@ public final class DroneController {
         Vec3 offset = delta.horizontalDistanceSqr() < 1.0E-4D
                 ? new Vec3(this.followRadius, 0.0D, 0.0D)
                 : new Vec3(delta.x, 0.0D, delta.z).normalize().scale(this.followRadius);
-        this.goal = target.position().add(offset).add(0.0D, this.followRadius * 0.5D, 0.0D);
+        this.goal = flightPosition(level, target.position().add(offset));
         drone.setClearTargetOnArrival(false);
         drone.setTargetPosition(this.goal);
     }
@@ -481,6 +484,7 @@ public final class DroneController {
             return;
         }
 
+        destination = flightPosition(level, destination);
         this.goal = destination;
         this.status = moving;
         drone.setClearTargetOnArrival(false);
@@ -515,7 +519,8 @@ public final class DroneController {
 
         List<Vec3> path = DronePathfinder.findPath(level, from, destination, this.config);
         if (path == null && this.config.cruiseAltitude > 0) {
-            Vec3 cruise = from.add(0.0D, this.config.cruiseAltitude, 0.0D);
+            Vec3 cruise = new Vec3(from.x, Math.min(from.y + this.config.cruiseAltitude,
+                    ceilingAt(level, from.x, from.z)), from.z);
             if (DronePathfinder.clearLine(level, from, cruise, this.config)) {
                 List<Vec3> above = DronePathfinder.findPath(level, cruise, destination, this.config);
                 if (above != null) {
@@ -533,6 +538,27 @@ public final class DroneController {
         this.waypoints.addAll(path);
         drone.setTargetPosition(this.waypoints.peek());
         return true;
+    }
+
+    /**
+     * Resolves every route's vertical coordinate at execution time. This is intentionally the
+     * only place autonomous routes choose Y: workflows and operators state a map position, while
+     * terrain determines a safe, bounded altitude at that position.
+     */
+    private Vec3 flightPosition(ServerLevel level, Vec3 horizontalTarget) {
+        int x = net.minecraft.util.Mth.floor(horizontalTarget.x);
+        int z = net.minecraft.util.Mth.floor(horizontalTarget.z);
+        int ground = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) - 1;
+        double y = Math.max(ground + this.config.minAltitudeAboveGround,
+                Math.min(ground + this.config.targetAltitudeAboveGround,
+                        ground + this.config.maxAltitudeAboveGround));
+        return new Vec3(horizontalTarget.x, y, horizontalTarget.z);
+    }
+
+    private double ceilingAt(ServerLevel level, double x, double z) {
+        int ground = level.getHeight(Heightmap.Types.MOTION_BLOCKING,
+                net.minecraft.util.Mth.floor(x), net.minecraft.util.Mth.floor(z)) - 1;
+        return ground + this.config.maxAltitudeAboveGround;
     }
 
     // ---------------------------------------------------------------- health

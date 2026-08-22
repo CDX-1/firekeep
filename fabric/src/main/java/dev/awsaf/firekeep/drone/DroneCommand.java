@@ -55,13 +55,16 @@ public final class DroneCommand {
                 if (direction() == null) {
                     throw new IllegalArgumentException("move needs a \"direction\" (north, southwest, up, ...)");
                 }
+                if (direction() == Compass.UP || direction() == Compass.DOWN) {
+                    throw new IllegalArgumentException("vertical movement is controlled by the drone flight envelope");
+                }
                 if (distance() <= 0.0D) {
                     throw new IllegalArgumentException("move needs a positive \"distance\"");
                 }
             }
             case MOVE_TO -> {
                 if (target() == null) {
-                    throw new IllegalArgumentException("move_to needs \"x\", \"y\" and \"z\"");
+                    throw new IllegalArgumentException("move_to needs \"x\" and \"z\"; altitude is controlled by the drone");
                 }
             }
             case FOLLOW -> {
@@ -127,7 +130,7 @@ public final class DroneCommand {
         return number(this.args, "distance", 0.0D);
     }
 
-    /** Where {@code move_to} and {@code set_home} are aiming, or null when unspecified. */
+    /** Horizontal destination; a caller-supplied Y is deliberately ignored by the flight controller. */
     public Vec3 target() {
         if (this.args.has("position") && this.args.get("position").isJsonObject()) {
             JsonObject position = this.args.getAsJsonObject("position");
@@ -186,9 +189,9 @@ public final class DroneCommand {
                 }
             } else if (element.isJsonArray()) {
                 JsonArray triple = element.getAsJsonArray();
-                if (triple.size() >= 3) {
-                    points.add(new Vec3(triple.get(0).getAsDouble(), triple.get(1).getAsDouble(),
-                            triple.get(2).getAsDouble()));
+                if (triple.size() >= 2) {
+                    points.add(new Vec3(triple.get(0).getAsDouble(), 0.0D,
+                            triple.get(triple.size() - 1).getAsDouble()));
                 }
             }
         }
@@ -211,13 +214,13 @@ public final class DroneCommand {
     // ---------------------------------------------------------------- json helpers
 
     private static Vec3 vec(JsonObject json) {
-        if (json == null || !json.has("x") || !json.has("y") || !json.has("z")) {
+        if (json == null || !json.has("x") || !json.has("z")) {
             return null;
         }
         try {
-            return new Vec3(json.get("x").getAsDouble(), json.get("y").getAsDouble(), json.get("z").getAsDouble());
+            return new Vec3(json.get("x").getAsDouble(), 0.0D, json.get("z").getAsDouble());
         } catch (RuntimeException e) {
-            throw new IllegalArgumentException("x, y and z must be numbers");
+            throw new IllegalArgumentException("x and z must be numbers");
         }
     }
 

@@ -34,7 +34,35 @@
 .rail ul button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 13px 5px 25px; color: var(--muted); background: transparent; border: 0; font: inherit; font-size: 11px; text-align: left; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
 .rail ul button:hover { color: var(--text); background: rgba(255, 255, 255, .025); }
 .rail ul button[data-active="true"] { color: var(--text); background: rgba(255, 255, 255, .055); border-radius: 5px; }
-.rail ul button span:first-child { flex: 1; }
+/* The role chip leads, then the callsign takes the room that is left. */
+.rail ul button span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; }
+.roleTag { flex: 0 0 auto; padding: 1px 4px; color: var(--role, var(--muted)); border: 1px solid color-mix(in srgb, var(--role, var(--muted)) 45%, transparent); border-radius: 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; letter-spacing: .06em; }
+.rail ul button[data-active="true"] .roleTag { color: #0d100e; background: var(--role, var(--warm)); border-color: transparent; }
+.roleName { color: var(--muted); font-size: 10px; font-style: normal; letter-spacing: .02em; }
+
+/*
+ * Spawns that have been ordered and not yet arrived.
+ *
+ * Above the roster rather than inside it: these are not drones, and putting them in the list of
+ * drones would have the count disagree with the map. The dot keeps time with the ring on the
+ * canvas, so the two marks read as the same thing.
+ */
+.deployList { margin: 0 0 8px; padding: 0 13px; list-style: none; }
+.deployList li { display: flex; align-items: center; gap: 7px; padding: 4px 0; color: var(--muted); font-size: 11px; }
+.deployList i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--accent); animation: deployPulse 1.2s ease-in-out infinite; }
+.deployList li[data-state="lost"] { color: #e0a79e; }
+.deployList li[data-state="lost"] i { background: #e2604a; animation: none; }
+.deployList li > span { flex: 1; min-width: 0; }
+.deployList button { padding: 0; color: var(--muted); background: transparent; border: 0; cursor: pointer; }
+.deployList button:hover { color: var(--text); }
+@keyframes deployPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .deployList i { animation: none; } }
+
+/* Which roles are in the air, and the key to every marker colour on the canvas. */
+.legend { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 13px 8px; }
+.legend span { display: flex; align-items: center; gap: 4px; padding: 2px 5px; color: var(--role); background: color-mix(in srgb, var(--role) 12%, transparent); border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; letter-spacing: .05em; }
+.legend i { width: 4px; height: 4px; border-radius: 50%; background: var(--role); }
+.legend b { color: #eef2ee; font-weight: 600; }
 .coords { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; font-variant-numeric: tabular-nums; }
 .empty { margin: 4px 13px; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .orderError { color: var(--warm); }

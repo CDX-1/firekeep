@@ -474,12 +474,65 @@ def record_mod_event(payload):
         else:
             _MOD_EVENTS.insert(0, record)
         del _MOD_EVENTS[MAX_MOD_EVENTS:]
+        # A sighting is an operational incident too, not merely transport telemetry. Fold it
+        # into the dashboard's durable disaster log once per stable incident id so the alert is
+        # visible even if n8n is down or has not yet assigned responders.
+        if record["event"] in ("fire_detected", "disaster_detected"):
+            location = record.get("location") if isinstance(record.get("location"), dict) else {}
+            incident_id = str(record.get("incident_id") or record["id"])
+            if incident_id not in _EVENTS_BY_ID and location.get("x") is not None and location.get("z") is not None:
+                detected = {
+                    "id": incident_id, "kind": "fire",
+                    "dimension": str(record.get("dimension") or "minecraft:overworld"),
+                    "x": _finite(location["x"], "location.x"),
+                    "y": location.get("y"), "z": _finite(location["z"], "location.z"),
+                    "radius": int(record.get("size") or 1), "intensity": int(record.get("size") or 1),
+                    "label": "Drone-detected disaster", "source": record.get("drone_id") or "drone",
+                    "created": record["at"] / 1000.0, "status": "done",
+                    "affected": int(record.get("size") or 1), "error": None,
+                }
+                _EVENTS.append(detected)
+                _EVENTS_BY_ID[incident_id] = detected
+                while len(_EVENTS) > MAX_EVENTS:
+                    _EVENTS_BY_ID.pop(_EVENTS.pop(0)["id"], None)
         subscribers = list(_SUBSCRIBERS)
+        published = None
+        if record["event"] in ("fire_detected", "disaster_detected"):
+            detected = _EVENTS_BY_ID.get(str(record.get("incident_id") or record["id"]))
+            if detected is not None:
+                published = {"dimension": detected["dimension"], "events": [dict(detected)]}
+                # The camera HUD is per-drone and normally receives n8n's higher-level
+                # observations. A raw fire sighting is important enough to show immediately,
+                # without making the operator wait for the webhook round trip.
+                camera_event = {
+                    "id": "mod-" + str(detected["id"]),
+                    "drone_id": record.get("drone_id") or "",
+                    "type": "fire_detected",
+                    "severity": "critical" if record["event"] == "disaster_detected" else "high",
+                    "message": "Fire detected; observation lock requested.",
+                    "location": {
+                        "x": detected["x"], "y": detected["y"], "z": detected["z"],
+                        "dimension": detected["dimension"],
+                    },
+                    "created": detected["created"],
+                }
+                for index, previous in enumerate(_DRONE_EVENTS):
+                    if previous["id"] == camera_event["id"]:
+                        _DRONE_EVENTS[index] = camera_event
+                        break
+                else:
+                    _DRONE_EVENTS.insert(0, camera_event)
+                del _DRONE_EVENTS[MAX_DRONE_EVENTS:]
 
     # The dashboard watches the same stream for disasters, so a fire the mod spotted on its
     # own shows up there without a second connection.
     for sink in subscribers:
         try:
+            # The map already consumes its normal `events` SSE channel. Publishing the
+            # normalised incident there makes a drone-detected fire appear immediately instead
+            # of waiting for a page reload, while `mod` remains available to other consumers.
+            if published is not None:
+                sink.put_nowait(("events", published))
             sink.put_nowait(("mod", dict(record)))
         except queue.Full:
             pass

@@ -257,15 +257,15 @@ its caller is told so, which is what makes it safe for an AI to change its mind 
 
 | `command` | Fields | Notes |
 |---|---|---|
-| `move` | `direction`, `distance`, optional `altitude` | Eight compass points plus `up` / `down`. |
-| `move_to` | `x`, `y`, `z` | Or a nested `"position": {x,y,z}`. |
+| `move` | `direction`, `distance` | Eight horizontal compass points. The controller owns altitude. |
+| `move_to` | `x`, `z` | Or a nested `"position": {x,z}`. Any supplied `y` is ignored. |
 | `hover` | — | Brake and hold. |
 | `scan` | — | Forces a fresh scan; the result comes back in `data`. |
 | `return_home` | — | Flies to its stored home. |
 | `follow` | `target`, optional `radius` | Another drone's id, or a player name. Never completes. |
 | `dispense_water` | optional `radius` | Extinguishes fire around the ground below the drone. |
 | `look` | optional `yaw` and/or `pitch`, or `at: {x,y,z}` | Camera-only: does not interrupt an active move, patrol or follow. Positive pitch looks down; `{"command":"look","pitch":25}` gives a 25° downward angle. With no fields, the camera goes back to following motion. |
-| `patrol` | `waypoints: [{x,y,z}, …]`, optional `loop` | |
+| `patrol` | `waypoints: [{x,z}, …]`, optional `loop` | Each leg follows terrain within the configured altitude envelope. |
 | `set_speed` | `speed` (blocks/second) | |
 | `set_home` | optional `x`, `y`, `z` | Defaults to where it is now. Persists on the entity. |
 | `cancel` | — | Stop and hold. |
@@ -539,7 +539,7 @@ curl -s -X POST -H "$AUTH" -H "$JSON" \
   $API/drones/drone_01/command
 
 curl -s -X POST -H "$AUTH" -H "$JSON" \
-  -d '{"command":"move_to","x":120,"y":85,"z":-40,"await":true,"timeout_ms":60000}' \
+  -d '{"command":"move_to","x":120,"z":-40,"await":true,"timeout_ms":60000}' \
   $API/drones/drone_01/command
 
 # put a fire out, send the nearest drone somewhere, read the log

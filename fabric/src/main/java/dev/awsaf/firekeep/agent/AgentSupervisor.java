@@ -11,6 +11,8 @@ import net.minecraft.server.level.ServerLevel;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -305,15 +307,30 @@ public final class AgentSupervisor {
         AGENTS.clear();
     }
 
-    /** Ports are handed out in order and kept for as long as the agent exists. */
+    /**
+     * Ports are handed out in order and kept for as long as the agent exists.
+     * A previous server instance can leave a client alive for a few seconds (or be stopped
+     * outside this JVM), so the supervisor must not assume that its in-memory directory is the
+     * whole machine. Starting a client on an occupied port otherwise looks successful until its
+     * camera server fails to bind and the dashboard gets a permanent 502.
+     */
     private static int nextPort() {
         int port = config.portBase;
         Set<Integer> taken = new HashSet<>();
         AGENTS.values().forEach(agent -> taken.add(agent.port));
-        while (taken.contains(port)) {
+        while (taken.contains(port) || !portAvailable(port)) {
             port++;
         }
         return port;
+    }
+
+    private static boolean portAvailable(int port) {
+        try (ServerSocket probe = new ServerSocket(port, 1, InetAddress.getLoopbackAddress())) {
+            probe.setReuseAddress(true);
+            return true;
+        } catch (IOException ignored) {
+            return false;
+        }
     }
 
     private static String fill(String template, Agent agent, String username) {

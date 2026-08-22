@@ -192,6 +192,14 @@ public final class DronePathfinder {
         if (pos.getY() < level.getMinY() + 1 || pos.getY() >= level.getMaxY() - 1 || !level.isLoaded(pos)) {
             return BLOCKED;
         }
+        // Y is never an operator or workflow decision. Keep every planned cell in the same
+        // terrain-relative envelope, including over slopes and valleys between waypoints.
+        int ground = level.getHeight(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING,
+                pos.getX(), pos.getZ()) - 1;
+        int altitude = pos.getY() - ground;
+        if (altitude < config.minAltitudeAboveGround || altitude > config.maxAltitudeAboveGround) {
+            return BLOCKED;
+        }
         BlockClass here = BlockClass.of(level.getBlockState(pos), level, pos);
         if (here.blocking() || here.dangerous()) {
             return BLOCKED;

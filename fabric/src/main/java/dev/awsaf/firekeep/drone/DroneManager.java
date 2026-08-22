@@ -21,6 +21,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -334,7 +335,10 @@ public final class DroneManager {
 
     private static void maybeScan(ServerLevel level, DroneEntity drone, DroneController controller, long gameTime) {
         boolean requested = controller.consumeScanRequest();
-        long due = NEXT_SCAN.getOrDefault(drone.getUUID(), 0L);
+        // A wide fire watch is still a server-thread block read. Spread a fleet across its
+        // interval instead of making every new drone inspect the same tick.
+        long due = NEXT_SCAN.computeIfAbsent(drone.getUUID(), ignored -> gameTime
+                + Math.floorMod(drone.getUUID().hashCode(), config.perceptionIntervalTicks));
         if (!requested && gameTime < due) {
             return;
         }
@@ -438,36 +442,39 @@ public final class DroneManager {
      * right now - decides which one goes.
      */
     public static DispatchResult dispatch(Vec3 target, String dimension, JsonObject commandBody) {
-        DroneState closest = null;
-        double bestDistance = Double.MAX_VALUE;
-        for (DroneState state : roster()) {
-            if (!state.available()) {
-                continue;
-            }
-            if (dimension != null && !dimension.isBlank() && !state.dimension().equals(dimension)) {
-                continue;
-            }
-            double distance = state.position().distanceTo(target);
-            if (distance < bestDistance) {
-                bestDistance = distance;
-                closest = state;
-            }
-        }
-        if (closest == null) {
-            return new DispatchResult(null, 0.0D, null);
-        }
+        List<DispatchResult> dispatched = dispatchMany(target, dimension, commandBody, 1);
+        return dispatched.isEmpty() ? new DispatchResult(null, 0.0D, null) : dispatched.getFirst();
+    }
 
-        DroneCommand command = DroneCommand.parse(closest.id(), commandBody);
-        submit(command);
-        String chosen = closest.id();
-        onServerThread(() -> {
-            for (DroneController controller : CONTROLLERS.values()) {
-                if (controller.droneId().equals(chosen)) {
-                    controller.markResponding();
+    /**
+     * Reserves several responders from one roster snapshot. Selecting the group atomically here
+     * prevents two fast workflow requests from assigning the same available drone twice.
+     */
+    public static List<DispatchResult> dispatchMany(Vec3 target, String dimension, JsonObject commandBody, int count) {
+        List<DroneState> candidates = roster().stream()
+                // A patrol is deliberately preemptible: continuous coverage is the drone's
+                // idle work, while a detected incident is the reason to stop it. Other active
+                // commands remain protected from being overwritten.
+                .filter(state -> state.available() || "patrol".equals(state.activeCommand()))
+                .filter(state -> dimension == null || dimension.isBlank() || state.dimension().equals(dimension))
+                .sorted(Comparator.comparingDouble(state -> state.position().distanceTo(target)))
+                .limit(Math.max(1, count))
+                .toList();
+        List<DispatchResult> results = new ArrayList<>();
+        for (DroneState state : candidates) {
+            DroneCommand command = DroneCommand.parse(state.id(), commandBody.deepCopy());
+            submit(command);
+            results.add(new DispatchResult(state, state.position().distanceTo(target), command));
+        }
+        if (!results.isEmpty()) {
+            List<String> chosen = results.stream().map(result -> result.drone().id()).toList();
+            onServerThread(() -> {
+                for (DroneController controller : CONTROLLERS.values()) {
+                    if (chosen.contains(controller.droneId())) controller.markResponding();
                 }
-            }
-        });
-        return new DispatchResult(closest, bestDistance, command);
+            });
+        }
+        return results;
     }
 
     public record DispatchResult(DroneState drone, double distance, DroneCommand command) {

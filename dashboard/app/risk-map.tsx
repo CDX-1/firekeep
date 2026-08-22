@@ -9,10 +9,13 @@ import {
   GRID_ROWS,
   MAX_RISK,
   RISK_LABELS,
+  cellOf,
   emptyGrid,
   type RiskCell,
   type RiskReport,
 } from "@/lib/risk";
+import { useIntel } from "@/lib/fleet-intel";
+import { ROLE_LIST, callsignOf, roleOf } from "@/lib/roles";
 import type { WorldMeta } from "@/lib/types";
 
 // -------------------------------------------------------------------------
@@ -87,7 +90,11 @@ function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min
 // -------------------------------------------------------------------------
 // Component
 
-export default function RiskMap({ active }: { active: boolean }) {
+export default function RiskMap({ active, onOpenDroneFeed }: {
+  active: boolean;
+  /** Hands a drone over to the camera wall, the same way the world map does. */
+  onOpenDroneFeed: (id: string) => void;
+}) {
   const stageRef = useRef<HTMLDivElement>(null);
   const mapCanvasRef = useRef<HTMLCanvasElement>(null);
   const gridCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -108,6 +115,23 @@ export default function RiskMap({ active }: { active: boolean }) {
   // Read the selection out of the live grid rather than holding a copy, so a cell whose risk the
   // model has just revised does not sit stale behind an open popup.
   const selectedCell = selected ? cells[selected.row]?.[selected.col] ?? null : null;
+
+  /*
+   * Who is over the selected cell, right now.
+   *
+   * The report carries a drone *count* per cell, taken when the model was asked - which can be
+   * ninety seconds old, and never said which aircraft anyway. The live feed is already being
+   * polled for the rest of the dashboard, so the panel names them off that instead: a count that
+   * disagrees with the roster is worse than no count, and "two on station" is a different
+   * situation from "two surveyors on station and no suppression".
+   */
+  const intel = useIntel(active);
+  const onStation = selected && intel.bounds
+    ? intel.drones.filter((drone) => {
+        const at = cellOf(drone.x, drone.z, intel.bounds!);
+        return at && at.col === selected.col && at.row === selected.row;
+      })
+    : [];
 
   // -----------------------------------------------------------------------
   // Load world
@@ -453,10 +477,30 @@ export default function RiskMap({ active }: { active: boolean }) {
               </span>
               <span className={styles.popupKey}>Recent events</span>
               <span className={styles.popupVal}>{selectedCell.events || "none"}</span>
-              <span className={styles.popupKey}>Drones</span>
-              <span className={styles.popupVal}>{selectedCell.drones || "none on station"}</span>
               <span className={styles.popupKey}>Grid cell</span>
               <span className={styles.popupVal}>col {selectedCell.col + 1}, row {selectedCell.row + 1}</span>
+            </div>
+
+            {/* Who is over it, by role - and a way straight to what they are looking at. */}
+            <div className={styles.popupStation}>
+              <span className={styles.popupKey}>On station</span>
+              {onStation.length === 0
+                ? <span className={styles.popupVal}>
+                    {selectedCell.risk >= 4 ? "nobody — this cell is uncovered" : "nobody"}
+                  </span>
+                : <ul className={styles.station}>
+                    {onStation.map((drone) => {
+                      const role = roleOf(drone.id);
+                      return <li key={drone.id} style={{ "--role": role.color } as React.CSSProperties}>
+                        <button type="button" onClick={() => onOpenDroneFeed(drone.id)}
+                                title={`Watch ${drone.id} - ${role.name}`}>
+                          <i />
+                          <span>{callsignOf(drone.id)}</span>
+                          <em>{role.code}</em>
+                        </button>
+                      </li>;
+                    })}
+                  </ul>}
             </div>
           </div>
         )}
@@ -492,6 +536,19 @@ export default function RiskMap({ active }: { active: boolean }) {
             {predicting ? "Reading…" : "Re-run"}
           </button>
         </header>
+
+        {intel.drones.length > 0 && (
+          <div className={styles.fleet} aria-label="Fleet composition">
+            {ROLE_LIST.map((role) => {
+              const count = intel.drones.filter((drone) => roleOf(drone.id).id === role.id).length;
+              if (count === 0) return null;
+              return <span key={role.id} style={{ "--role": role.color } as React.CSSProperties}
+                           title={`${count} x ${role.name} - ${role.tagline}`}>
+                <i />{role.code}<b>{count}</b>
+              </span>;
+            })}
+          </div>
+        )}
 
         {report && (
           <div className={styles.provenance}>

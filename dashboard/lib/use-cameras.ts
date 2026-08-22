@@ -1,36 +1,24 @@
 "use client";
 
 /**
- * The camera hooks, in both transports.
+ * The camera hooks.
  *
- * Streaming is the real one: one connection carries the roster and every frame, and the page
- * paints when Minecraft renders. Polling is what the dashboard used to do - a GET per tile per
- * refresh, and a timer on the roster - and it is kept because it is the only thing that works
- * through something that will not pass a streaming response, and because being able to turn
- * the clever transport off is how you find out whether it is the thing that is broken.
+ * One connection carries the roster and every frame, and the page paints when Minecraft
+ * renders. There used to be a second transport beside it - a GET per tile per refresh, with a
+ * fairness queue in front of it and a timer on the roster - kept as a fallback and as a way of
+ * finding out whether a blank grid was the stream's fault. It is gone: it was a second code
+ * path for every tile that was almost never exercised, and a wall of thumbnails fetched one at
+ * a time was never a dashboard anybody wanted to look at.
  *
- * Which one is in use is a single value threaded through these hooks. Nothing else in the page
- * knows the difference.
+ * So a dropped stream now reconnects rather than degrading, and the page has one way of getting
+ * a picture. What is left here is the React shape over lib/camera-feed.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { cameraFeed, type Connection, type FeedStatus } from "./camera-feed";
-import {
-  ROSTER_CONTROL_INTERVAL_MS,
-  ROSTER_INTERVAL_MS,
-  TILE_INTERVAL_MS,
-  areaOf,
-  getRoster,
-  type Profile,
-  type Roster,
-} from "./cameras";
-import { fetchFrame } from "./frames";
+import { areaOf, type Roster } from "./cameras";
 import type { DroneArea, DroneCamera } from "./types";
 
-/** How long to wait before retrying a frame the server could not give us yet. */
-const FRAME_RETRY_MS = 600;
-
-export type Transport = "stream" | "poll";
 export type Drone = DroneCamera & { area: DroneArea };
 
 export interface RosterState {
@@ -54,87 +42,38 @@ function withAreas(roster: Roster): RosterState {
 }
 
 /**
- * Which transport the page is using, and the state of the streaming one.
+ * The state of the one connection everything on the page is drawn from.
  *
- * The choice is a preference rather than a setting: asking for the stream and not getting one
- * falls back on its own, because a dashboard that shows nothing is worse than a dashboard that
- * polls. Asking for it again after that retries from scratch.
+ * Worth having on screen rather than buried: a grid that has gone blank is either Minecraft not
+ * running or the stream not arriving, and those are different problems with different fixes.
  */
-export function useTransport() {
-  const [preferred, setPreferred] = useState<Transport>("stream");
+export function useFeed() {
   const [status, setStatus] = useState<FeedStatus>({
     connection: "connecting", online: false, agents: 0, clientFps: 0, error: null,
   });
 
   useEffect(() => cameraFeed.onStatus(setStatus), []);
 
-  // A stream that has given up is not worth waiting on; the tiles go back to asking.
-  const transport: Transport = preferred === "stream" && status.connection !== "failed"
-    ? "stream"
-    : "poll";
-
-  // Streaming is the default, so the feed opens with the page and closes with it.
+  // The feed opens with the page and closes with it; nothing else turns it on or off.
   useEffect(() => {
     cameraFeed.open();
     return () => cameraFeed.close();
   }, []);
 
-  const choose = useCallback((next: Transport) => {
-    setPreferred(next);
-    // The connection is driven from here rather than from an effect on `preferred`, because
-    // asking for the stream after it has given up does not change `preferred` - it was
-    // "stream" the whole time, and only the fallback moved. That click still has to reconnect.
-    if (next === "poll") {
-      cameraFeed.close();
-      return;
-    }
-    cameraFeed.reset();
-    cameraFeed.open();
-  }, []);
-
-  return { transport, preferred, choose, connection: status.connection as Connection,
-           error: status.error };
+  return { connection: status.connection as Connection, error: status.error,
+           online: status.online, agents: status.agents, clientFps: status.clientFps };
 }
 
 /**
  * The live roster.
  *
- * Streaming, this arrives as the server notices it change - including the positions, which it
- * merges from the mod's own feed several times a second. Polling, it is a timer, and flying by
- * hand has to wind that timer up to stay smooth.
+ * Pushed as the server notices it change - including the positions, which it merges from the
+ * mod's own feed several times a second. Nothing here has a timer in it, which is why flying a
+ * drone by hand stays smooth without anything having to be told that somebody is flying.
  */
-export function useRoster(transport: Transport, flying: boolean): RosterState {
+export function useRoster(): RosterState {
   const [state, setState] = useState<RosterState>(EMPTY);
-
-  useEffect(() => {
-    if (transport !== "stream") return;
-    return cameraFeed.onRoster((roster) => setState(withAreas(roster)));
-  }, [transport]);
-
-  useEffect(() => {
-    if (transport !== "poll") return;
-    const intervalMs = flying ? ROSTER_CONTROL_INTERVAL_MS : ROSTER_INTERVAL_MS;
-    const controller = new AbortController();
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const roster = await getRoster(controller.signal);
-        if (!cancelled) setState(withAreas(roster));
-      } catch {
-        if (!cancelled) setState(EMPTY);
-      }
-    };
-
-    void poll();
-    const timer = setInterval(poll, intervalMs);
-    return () => {
-      cancelled = true;
-      controller.abort();
-      clearInterval(timer);
-    };
-  }, [transport, flying]);
-
+  useEffect(() => cameraFeed.onRoster((roster) => setState(withAreas(roster))), []);
   return state;
 }
 
@@ -151,18 +90,8 @@ export function useRoster(transport: Transport, flying: boolean): RosterState {
  * <p>Object URLs are released two frames behind, which is well after the browser has decoded
  * them and avoids leaking one per frame - at 60fps the old "revoke in two seconds" left a hundred
  * and twenty alive at any moment.
- *
- * <p>`profile` only reaches the polling path: a still for a drone somebody has singled out is
- * worth asking for at full size, because in that mode it is the picture rather than a
- * placeholder. The streaming path takes whatever the shared feed is carrying.
  */
-export function useDroneFrame(
-  id: string,
-  active: boolean,
-  transport: Transport,
-  priority = false,
-  profile?: Profile,
-) {
+export function useDroneFrame(id: string, active: boolean) {
   const image = useRef<HTMLImageElement | null>(null);
   const shown = useRef<string | null>(null);
   const stale = useRef<string | null>(null);
@@ -202,60 +131,17 @@ export function useDroneFrame(
     return release;
   }, [id, release]);
 
-  // -- streaming: the frames come to us -----------------------------------
+  // Registering interest is what makes the server pull this drone off Minecraft at all, so a
+  // tile that stops showing a picture stops costing one.
   useEffect(() => {
-    if (!active || transport !== "stream") return;
+    if (!active) return;
     const want = cameraFeed.want(id);
     const off = cameraFeed.onFrame(id, paint);
     return () => {
       off();
       want();
     };
-  }, [id, active, transport, paint]);
-
-  // -- polling: we go and get them ----------------------------------------
-  useEffect(() => {
-    if (!active || transport !== "poll") return;
-    const controller = new AbortController();
-    let stopped = false;
-
-    const run = async () => {
-      while (!stopped) {
-        try {
-          const blob = await fetchFrame(id, controller.signal, priority, profile);
-          if (stopped) return;
-          paint(blob);
-          await wait(TILE_INTERVAL_MS, controller.signal);
-        } catch {
-          if (stopped) return;
-          // 503 while the agent renders this drone's first frame, or an agent restarting.
-          await wait(FRAME_RETRY_MS, controller.signal).catch(() => undefined);
-        }
-      }
-    };
-
-    void run();
-    return () => {
-      stopped = true;
-      controller.abort();
-    };
-  }, [id, active, transport, priority, profile, paint]);
+  }, [id, active, paint]);
 
   return { image, ready };
-}
-
-/** A cancellable sleep, so a feed that goes away stops waiting rather than finishing its nap. */
-function wait(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) return reject(new DOMException("aborted", "AbortError"));
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new DOMException("aborted", "AbortError"));
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
 }
