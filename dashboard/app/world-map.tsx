@@ -10,6 +10,9 @@ import { areaOf } from "@/lib/cameras";
 import { LiveLayer } from "./live-layer";
 import { DIMENSION, getLive, liveMapUrl, sendDroneTo, streamUrl,
          type LiveDelta, type LiveDrone, type LiveSnapshot } from "@/lib/live";
+import Simulator from "./simulator";
+import { EVENT_INFO, getEvents, isPending, mergeEvents, simulate,
+         type EventKind, type LiveEvents, type SimEvent } from "@/lib/events";
 
 /**
  * How fast a marker catches up with the position the mod last reported, per second.
@@ -55,12 +58,25 @@ type Drag =
 /** What we are drawing under the drones: either the real save, or a stand-in. */
 type Backdrop = { meta: WorldMeta; image: CanvasImageSource; real: boolean };
 
+/**
+ * What the map is for right now.
+ *
+ * Both modes are the same map, the same feed and the same canvas - only what a click means and
+ * which rail is beside it change. Keeping one instance is the point: the simulation tab opens on
+ * exactly the view you left the drone tab at, already showing the fires you started.
+ */
+export type MapMode = "drones" | "simulate";
+
+/** How the placement circle is aimed, so the render loop can read it without restarting. */
+type SimSettings = { mode: MapMode; tool: EventKind; radius: number };
+
 type WorldMapProps = {
   active: boolean;
+  mode: MapMode;
   onOpenDroneFeed: (id: string) => void;
 };
 
-export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
+export default function WorldMap({ active, mode, onOpenDroneFeed }: WorldMapProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ x: 0, y: 0, scale: 1 });
@@ -72,6 +88,8 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
   const layerRef = useRef<LiveLayer | null>(null);
   const sessionRef = useRef<string>("");
   const liveRef = useRef<LiveDrone[]>([]);
+  const eventsRef = useRef<SimEvent[]>([]);
+  const simRef = useRef<SimSettings>({ mode: "drones", tool: "fire", radius: 8 });
 
   const [feed, setFeed] = useState<LiveSnapshot | null>(null);
   const [liveDrones, setLiveDrones] = useState<LiveDrone[]>([]);
@@ -82,6 +100,13 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
   const [cursor, setCursor] = useState<Vec | null>(null);
   const [zoom, setZoom] = useState(1);
   const [, setPulse] = useState(0);          // nudges the side rail to re-read the sim
+
+  // the simulator: what the next click on the map will set off, and everything already set off
+  const [tool, setTool] = useState<EventKind>("fire");
+  const [radius, setRadius] = useState(8);
+  const [intensity, setIntensity] = useState(6);
+  const [events, setEvents] = useState<SimEvent[]>([]);
+  const [simError, setSimError] = useState<string | null>(null);
 
   // ---------------------------------------------------------------- the world
 
@@ -151,13 +176,29 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
       setFeed((current) => (current ? { ...current, hot: delta.hot, tick: delta.tick, age: 0, live: true } : current));
     });
 
+    // Disasters move on in their own time - queued, collected by the mod, then carried out -
+    // so the server pushes each step down the same stream rather than making us poll for it.
+    source.addEventListener("events", (event) => {
+      const batch = JSON.parse((event as MessageEvent).data) as LiveEvents;
+      setEvents((current) => mergeEvents(current, batch.events));
+    });
+
     // EventSource retries on its own; surface the gap rather than fighting it
     source.onerror = () => setFeed((current) => (current ? { ...current, live: false } : current));
 
     return () => { closed = true; source.close(); };
   }, [seed]);
 
+  // The stream only carries changes, so the log starts from what the server already has.
+  useEffect(() => {
+    getEvents(DIMENSION)
+      .then(({ events: seeded }) => setEvents((current) => mergeEvents(current, seeded)))
+      .catch(() => undefined);       // no server yet; the map's own notice already says so
+  }, []);
+
   useEffect(() => { liveRef.current = liveDrones; }, [liveDrones]);
+  useEffect(() => { eventsRef.current = events; }, [events]);
+  useEffect(() => { simRef.current = { mode, tool, radius }; }, [mode, tool, radius]);
 
   // The feed goes quiet the moment Minecraft closes; age it out so the badge tells the truth.
   useEffect(() => {
@@ -241,6 +282,9 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
         hovered: hoverRef.current,
         drag: dragRef.current,
         layer: layerRef.current,
+        events: eventsRef.current,
+        sim: simRef.current,
+        cursor: cursorRef.current,
         time,
       });
 
@@ -327,6 +371,27 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
     }
   };
 
+  /**
+   * Sets off whatever the simulator rail is currently holding, at a point on the map.
+   *
+   * The request only says it was queued: the fire itself arrives later, over the world feed,
+   * like any other change to the world. That is why nothing is drawn optimistically here.
+   */
+  const place = useCallback((at: Vec) => {
+    setSimError(null);
+    const info = EVENT_INFO[tool];
+    void simulate({
+      kind: tool,
+      x: Math.round(at.x),
+      z: Math.round(at.z),
+      radius: info.scatters ? radius : 0,
+      intensity: Math.min(intensity, info.max),
+      dimension: DIMENSION,
+    })
+      .then(({ event }) => setEvents((current) => mergeEvents(current, [event])))
+      .catch((cause) => setSimError(cause instanceof Error ? cause.message : String(cause)));
+  }, [tool, radius, intensity]);
+
   const endDrag = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointer !== event.pointerId) return;
@@ -335,8 +400,24 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
+    // In simulation mode a click on open map places an event; the same slop that tells a
+    // click from a flight order tells it from a pan.
+    if (drag.kind === "pan") {
+      // Against the view as it was when the press landed: even a click nudges the map a
+      // pixel or two, and at a zoomed-out scale a pixel or two is a long way to be wrong by.
+      if (mode === "simulate" && drag.moved <= DRAG_SLOP) {
+        const { scale } = viewRef.current;
+        const meta = backdrop?.meta;
+        place({
+          x: (drag.fromX - drag.viewX) / scale + (meta?.origin_x ?? 0),
+          z: (drag.fromY - drag.viewY) / scale + (meta?.origin_z ?? 0),
+        });
+      }
+      return;
+    }
+
     // A short drag out of a drone was a click; a real one is a flight order.
-    if (drag.kind !== "aim" || drag.moved <= DRAG_SLOP) return;
+    if (drag.moved <= DRAG_SLOP) return;
     const target = toWorld(drag.toX, drag.toY);
 
     const drone = liveRef.current.find((d) => d.id === drag.drone);
@@ -418,6 +499,7 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
           className={styles.canvas}
           ref={canvasRef}
           data-dragging={dragRef.current?.kind ?? "none"}
+          data-mode={mode}
           aria-label="Top-down map of the Minecraft world with drone positions"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -429,7 +511,9 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
         />
 
         <div className={styles.hint} aria-hidden="true">
-          Drag an arrow out of a drone to send it there &middot; drag the map to pan &middot; scroll to zoom
+          {mode === "simulate"
+            ? <>Click the map to set off a {EVENT_INFO[tool].label.toLowerCase()} &middot; drag to pan &middot; scroll to zoom</>
+            : <>Drag an arrow out of a drone to send it there &middot; drag the map to pan &middot; scroll to zoom</>}
           {feed?.live && " · the mod is streaming changes as they happen"}
         </div>
 
@@ -471,6 +555,21 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
         )}
       </div>
 
+      {mode === "simulate" ? (
+        <Simulator
+          tool={tool}
+          onTool={setTool}
+          radius={radius}
+          onRadius={setRadius}
+          intensity={intensity}
+          onIntensity={setIntensity}
+          events={events}
+          burning={feed?.hot ?? 0}
+          live={feed?.live ?? false}
+          error={simError}
+          onFocus={(event) => centerOnPoint(event.x, event.z)}
+        />
+      ) : (
       <aside className={styles.rail} aria-label="Drones on the map">
         <header>
           <span>Drones</span>
@@ -531,6 +630,7 @@ export default function WorldMap({ active, onOpenDroneFeed }: WorldMapProps) {
           )}
         </footer>
       </aside>
+      )}
     </div>
   );
 }
@@ -588,8 +688,17 @@ type Overlay = {
   hovered: string | null;
   drag: Drag | null;
   layer: LiveLayer | null;
+  events: SimEvent[];
+  sim: SimSettings;
+  /** where the pointer is on the canvas, for the placement circle */
+  cursor: { x: number; y: number } | null;
   time: number;
 };
+
+/** Events older than this stop being drawn - the burn scar under them says it better by then. */
+const EVENT_FADE_SECONDS = 240;
+/** Newest first, so a busy log never costs more than this many rings a frame. */
+const MAX_EVENT_RINGS = 60;
 
 function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, markers: Marker[], overlay: Overlay) {
   if (!canvas) return;
@@ -639,6 +748,12 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
     drawFire(ctx, layer, view, toScreenX(layer.originX), toScreenY(layer.originZ), overlay.time);
   }
 
+  // where the disasters were called down, and where the next one would land
+  drawEvents(ctx, overlay.events, view, toScreenX, toScreenY, overlay.time);
+  if (overlay.sim.mode === "simulate" && overlay.cursor && !overlay.drag) {
+    drawPlacement(ctx, overlay.cursor, overlay.sim, view);
+  }
+
   // drag arrow first, so markers sit on top of it
   const aim = overlay.drag?.kind === "aim" ? overlay.drag : null;
   if (aim && aim.moved > DRAG_SLOP) {
@@ -664,6 +779,80 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
       labelled: true,
     });
   }
+}
+
+/**
+ * Where each simulated disaster was called down.
+ *
+ * A ring the size of the event, fading out over a few minutes: long enough to see what you just
+ * did and where it is spreading from, short enough that an hour of drills does not bury the map.
+ * One that has not landed yet pulses instead, because a queued fire and a fire that failed to
+ * catch look identical on the ground and are not at all the same thing.
+ */
+function drawEvents(ctx: CanvasRenderingContext2D, events: SimEvent[], view: View,
+                    toScreenX: (bx: number) => number, toScreenY: (bz: number) => number,
+                    time: number) {
+  const now = Date.now() / 1000;
+
+  ctx.save();
+  for (const event of events.slice(0, MAX_EVENT_RINGS)) {
+    const age = now - event.created;
+    const pending = isPending(event);
+    if (!pending && age > EVENT_FADE_SECONDS) continue;
+
+    const fade = pending ? 1 : 1 - age / EVENT_FADE_SECONDS;
+    const x = toScreenX(event.x);
+    const y = toScreenY(event.z);
+    // a bare marker still reads at any zoom, where a 4-block circle would vanish
+    const ring = Math.max(7, event.radius * view.scale);
+
+    ctx.globalAlpha = fade * (pending ? 0.45 + 0.35 * Math.sin(time / 260) : 0.7);
+    ctx.strokeStyle = EVENT_INFO[event.kind].color;
+    ctx.lineWidth = 1.3;
+    ctx.setLineDash(pending ? [3, 4] : []);
+    ctx.beginPath();
+    ctx.arc(x, y, ring, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.setLineDash([]);
+    ctx.globalAlpha = fade;
+    ctx.beginPath();
+    ctx.moveTo(x - 3.5, y);
+    ctx.lineTo(x + 3.5, y);
+    ctx.moveTo(x, y - 3.5);
+    ctx.lineTo(x, y + 3.5);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** The circle under the cursor showing where and how wide the next event would be. */
+function drawPlacement(ctx: CanvasRenderingContext2D, cursor: { x: number; y: number },
+                       sim: SimSettings, view: View) {
+  const info = EVENT_INFO[sim.tool];
+  const ring = info.scatters ? Math.max(6, sim.radius * view.scale) : 9;
+
+  ctx.save();
+  ctx.strokeStyle = info.color;
+  ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 1.2;
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  ctx.arc(cursor.x, cursor.y, ring, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  ctx.beginPath();
+  ctx.moveTo(cursor.x - 6, cursor.y);
+  ctx.lineTo(cursor.x + 6, cursor.y);
+  ctx.moveTo(cursor.x, cursor.y - 6);
+  ctx.lineTo(cursor.x, cursor.y + 6);
+  ctx.stroke();
+  ctx.restore();
+
+  label(ctx, info.scatters ? `${info.label} · ${sim.radius}m` : info.label,
+    cursor.x, cursor.y + ring + 6);
 }
 
 /**

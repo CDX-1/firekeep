@@ -70,3 +70,7 @@
 
 @keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .feedState[data-live="true"]::before, .fires::before { animation: none; } }
+
+/* In simulation mode the map is an aiming surface, so it says so before you press. */
+.canvas[data-mode="simulate"] { cursor: crosshair; }
+.canvas[data-mode="simulate"][data-dragging="pan"] { cursor: grabbing; }

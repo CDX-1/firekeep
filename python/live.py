@@ -11,6 +11,10 @@ The two layers are complementary and neither replaces the other. Disk knows the 
 world but is minutes stale; the feed is instant but only knows chunks that are loaded.
 The dashboard draws the feed on top.
 
+This is also where the dashboard's orders wait: drone flights and the simulator's disasters
+are parked here and handed to the mod in the reply to its next push, since nothing out here
+can call into Minecraft.
+
 Columns are stored per chunk as 256 packed uint32s (flags << 24 | rgb, 0 meaning "never
 seen"), which keeps a long session's overlay to about a kilobyte per chunk.
 """
@@ -21,6 +25,7 @@ import queue
 import struct
 import threading
 import time
+import uuid
 import zlib
 from array import array
 
@@ -35,13 +40,22 @@ MAX_CHUNKS = 20_000
 #: Dropped into every idle SSE connection so proxies do not time it out.
 HEARTBEAT = 15.0
 
-#: How long a drone order waits for the mod to collect it before it is dropped.
+#: How long an order waits for the mod to collect it before it is dropped.
 COMMAND_TTL = 30.0
+
+#: The disasters the dashboard may set off. See Disasters.java for what each one does in game.
+EVENT_KINDS = ("fire", "lightning", "explosion", "extinguish")
+#: How many past events are kept for the dashboard's log.
+MAX_EVENTS = 200
+#: Bounds on what an event may ask for, matching the caps the mod enforces on its own side.
+MAX_EVENT_RADIUS = 128
+MAX_EVENT_INTENSITY = 256
 
 _LOCK = threading.Lock()
 _WORLDS = {}                      # dimension -> _World
 _SUBSCRIBERS = []                 # list of queue.Queue
 _COMMANDS = []                    # drone orders waiting for the mod to pick them up
+_EVENTS = []                      # the disaster log, oldest first
 
 
 class _World:
@@ -156,7 +170,8 @@ def ingest(payload):
     Takes one batch from the mod and fans it out.
 
     The batch carries flat triples of x, z and the packed colour, plus wherever the
-    drones are right now. Returns the delta that went to the subscribers.
+    drones are right now, and what became of any disaster events the mod just carried out.
+    Returns the delta that went to the subscribers.
     """
     dimension = str(payload.get("dimension") or "minecraft:overworld")
     session = str(payload.get("session") or "")
@@ -180,7 +195,10 @@ def ingest(payload):
         if columns:
             world.png = None                     # the overlay changed underneath us
 
-        pending = _take_commands_locked()
+        touched = _absorb_reports_locked(payload.get("events") or [])
+        pending, sent = _take_commands_locked()
+        touched.extend(e for e in sent if e not in touched)
+
         delta = {
             "dimension": dimension,
             "session": session,
@@ -189,11 +207,18 @@ def ingest(payload):
             "hot": len(world.hot),
             "tick": world.tick,
         }
+        # Grouped by the event's own dimension, not this batch's: the stream filters on that
+        # field, and the mod flushes one batch per level.
+        moved = {}
+        for record in touched:
+            moved.setdefault(record["dimension"], []).append(dict(record))
         subscribers = list(_SUBSCRIBERS)
 
     for sink in subscribers:
         try:
             sink.put_nowait(("delta", delta))
+            for where, records in moved.items():
+                sink.put_nowait(("events", {"dimension": where, "events": records}))
         except queue.Full:
             pass                                  # a slow dashboard misses a frame, no more
     return delta, pending
@@ -241,12 +266,128 @@ def _enqueue(command):
 
 
 def _take_commands_locked():
-    """Hands over every fresh order and clears the queue. Caller must hold the lock."""
+    """
+    Hands over every fresh order and clears the queue. Caller must hold the lock.
+
+    Returns the commands the mod should carry out, and the event records that just went from
+    waiting to on their way - an order that timed out here never reached Minecraft, and saying
+    so is more use to an operator than leaving it queued forever.
+    """
     now = time.time()
-    out = [{k: v for k, v in c.items() if k != "at"}
-           for c in _COMMANDS if now - c["at"] < COMMAND_TTL]
+    out = []
+    moved = []
+    for command in _COMMANDS:
+        fresh = now - command["at"] < COMMAND_TTL
+        if fresh:
+            out.append({k: v for k, v in command.items() if k != "at"})
+        record = _EVENTS_BY_ID.get(command.get("event_id"))
+        if record is not None:
+            record["status"] = "sent" if fresh else "dropped"
+            if not fresh:
+                record["error"] = "the mod never collected it"
+            moved.append(record)
     _COMMANDS.clear()
-    return out
+    return out, moved
+
+
+# --------------------------------------------------------------------------
+# disaster events
+#
+# The dashboard cannot reach Minecraft; the mod cannot be called. So an event is parked here
+# and handed to the mod in the reply to its next feed push, exactly like a drone order, and the
+# outcome comes back the same way on the push after that. That round trip is why an event has a
+# status at all: "queued" is a wish, "done" is a fire that actually caught.
+
+_EVENTS_BY_ID = {}                # id -> the same dict that is in _EVENTS
+
+
+def simulate(kind, x, z, *, y=None, radius=6, intensity=3, dimension="minecraft:overworld",
+             label="", source="dashboard"):
+    """
+    Queues one disaster for the mod to carry out, and returns the record that tracks it.
+
+    :raises ValueError: if the event asks for something the mod would refuse anyway
+    """
+    kind = str(kind)
+    if kind not in EVENT_KINDS:
+        raise ValueError(f"unknown kind {kind!r}; expected one of {', '.join(EVENT_KINDS)}")
+
+    x, z = _finite(x, "x"), _finite(z, "z")
+    y = None if y is None else _finite(y, "y")
+    radius = max(0, min(MAX_EVENT_RADIUS, int(radius)))
+    intensity = max(1, min(MAX_EVENT_INTENSITY, int(intensity)))
+
+    record = {
+        "id": f"ev-{uuid.uuid4().hex[:8]}",
+        "kind": kind,
+        "dimension": str(dimension),
+        "x": x, "y": y, "z": z,
+        "radius": radius,
+        "intensity": intensity,
+        "label": str(label or "")[:80],
+        "source": str(source)[:40],
+        "created": time.time(),
+        "status": "queued",
+        "affected": None,
+        "error": None,
+    }
+
+    with _LOCK:
+        _COMMANDS.append({
+            "type": "event", "event_id": record["id"], "kind": kind,
+            "dimension": record["dimension"],
+            "x": x, "y": y, "z": z, "radius": radius, "intensity": intensity,
+            "at": time.time(),
+        })
+        _EVENTS.append(record)
+        _EVENTS_BY_ID[record["id"]] = record
+        while len(_EVENTS) > MAX_EVENTS:
+            _EVENTS_BY_ID.pop(_EVENTS.pop(0)["id"], None)
+        queued = len(_COMMANDS)
+        subscribers = list(_SUBSCRIBERS)
+        published = {"dimension": record["dimension"], "events": [dict(record)]}
+
+    for sink in subscribers:
+        try:
+            sink.put_nowait(("events", published))
+        except queue.Full:
+            pass
+    return dict(record), queued
+
+
+def events(dimension=None, limit=MAX_EVENTS):
+    """The disaster log, newest first."""
+    with _LOCK:
+        chosen = [e for e in reversed(_EVENTS) if dimension is None or e["dimension"] == dimension]
+        return [dict(e) for e in chosen[:max(0, int(limit))]]
+
+
+def _absorb_reports_locked(reports):
+    """
+    Takes the mod's word for what each event did. Caller must hold the lock.
+
+    Returns the records that changed, so the dashboard can be told without polling.
+    """
+    moved = []
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        record = _EVENTS_BY_ID.get(str(report.get("id") or ""))
+        if record is None:
+            continue                              # an event from before a restart; nothing to update
+        record["status"] = "done" if report.get("ok") else "failed"
+        record["affected"] = report.get("affected")
+        record["error"] = report.get("error")
+        record["finished"] = time.time()
+        moved.append(record)
+    return moved
+
+
+def _finite(value, name):
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValueError(f"{name} must be a finite number")
+    return number
 
 
 def world(dimension="minecraft:overworld"):

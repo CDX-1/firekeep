@@ -28,6 +28,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -56,6 +57,14 @@ public final class WorldFeed {
     private static final Map<ServerLevel, LongOpenHashSet> DIRTY = new HashMap<>();
     private static final BlockingQueue<byte[]> OUTBOX = new ArrayBlockingQueue<>(QUEUE_DEPTH);
     private static final BlockPos.MutableBlockPos SCRATCH = new BlockPos.MutableBlockPos();
+    /**
+     * What became of the disaster events the dashboard sent, waiting to ride the next push out.
+     *
+     * <p>Written on the server thread as each event is carried out and drained on the sender
+     * thread, hence the concurrent queue. Without this the dashboard could only ever report that
+     * it asked for a fire, never that one caught.
+     */
+    private static final ConcurrentLinkedQueue<JsonObject> REPORTS = new ConcurrentLinkedQueue<>();
 
     /** Identifies one run of the world, so the dashboard knows when to throw its overlay away. */
     private static volatile String session = "";
@@ -83,6 +92,7 @@ public final class WorldFeed {
                 DIRTY.clear();
             }
             OUTBOX.clear();
+            REPORTS.clear();
             stopSender();
         });
 
@@ -159,7 +169,7 @@ public final class WorldFeed {
     private static void flush(ServerLevel level) {
         long[] batch = drain(level);
         List<? extends DroneEntity> drones = level.getEntities(FirekeepEntities.DRONE, drone -> true);
-        if (batch.length == 0 && drones.isEmpty()) {
+        if (batch.length == 0 && drones.isEmpty() && REPORTS.isEmpty()) {
             return;
         }
         if (System.currentTimeMillis() < quietUntil) {
@@ -246,6 +256,20 @@ public final class WorldFeed {
             }
             json.append('}');
         }
+        // What came of the dashboard's disaster events, so it can show that a fire actually caught
+        // rather than only that it was asked for.
+        json.append("],\"events\":[");
+        for (int i = 0; ; i++) {
+            JsonObject report = REPORTS.poll();
+            if (report == null) {
+                break;
+            }
+            if (i > 0) {
+                json.append(',');
+            }
+            json.append(report);
+        }
+
         json.append("],\"hot\":").append(hot).append('}');
         return json.toString();
     }
@@ -302,11 +326,15 @@ public final class WorldFeed {
     }
 
     /**
-     * Carries out any drone orders the dashboard left in the reply.
+     * Carries out whatever the dashboard left in the reply.
      *
      * <p>Piggybacking on the feed's own response means an order costs no extra request and
      * lands within one flush. The work itself is handed to the server thread, since that is
-     * the only place an entity may be touched.
+     * the only place an entity or a block may be touched.
+     *
+     * <p>Two kinds of thing come down this channel: flight orders for a drone, and the disaster
+     * events the simulator sets off. Orders written before events existed carry no type at all,
+     * so a missing one still means "fly there".
      */
     private static void apply(JsonObject reply) {
         MinecraftServer server = running;
@@ -325,31 +353,12 @@ public final class WorldFeed {
                     continue;
                 }
                 JsonObject order = element.getAsJsonObject();
-                if (!order.has("id")) {
-                    continue;
+                String type = order.has("type") ? order.get("type").getAsString() : "goto";
+                if ("event".equals(type)) {
+                    REPORTS.add(Disasters.strike(levelFor(server, order), order));
+                } else {
+                    sendDrone(server, order);
                 }
-                DroneEntity drone = findDrone(server, order.get("id").getAsString());
-                if (drone == null) {
-                    continue;
-                }
-                if (flag(order, "hover")) {
-                    drone.hover();
-                    continue;
-                }
-                if (flag(order, "fly")) {
-                    drone.setFlightInput(
-                            number(order, "forward"),
-                            number(order, "right"),
-                            number(order, "up"),
-                            number(order, "yaw"));
-                    continue;
-                }
-                if (!order.has("x") || !order.has("y") || !order.has("z")) {
-                    continue;
-                }
-                drone.setTargetPosition(new Vec3(order.get("x").getAsDouble(),
-                        order.get("y").getAsDouble(), order.get("z").getAsDouble()));
-                drone.setClearTargetOnArrival(true);
             }
         });
     }
@@ -360,6 +369,46 @@ public final class WorldFeed {
 
     private static double number(JsonObject order, String key) {
         return order.has(key) ? order.get(key).getAsDouble() : 0.0D;
+    }
+
+    /** Server thread only. */
+    private static void sendDrone(MinecraftServer server, JsonObject order) {
+        if (!order.has("id")) {
+            return;
+        }
+        DroneEntity drone = findDrone(server, order.get("id").getAsString());
+        if (drone == null) {
+            return;
+        }
+        if (flag(order, "hover")) {
+            drone.hover();
+            return;
+        }
+        if (flag(order, "fly")) {
+            drone.setFlightInput(
+                    number(order, "forward"),
+                    number(order, "right"),
+                    number(order, "up"),
+                    number(order, "yaw"));
+            return;
+        }
+        if (!order.has("x") || !order.has("y") || !order.has("z")) {
+            return;
+        }
+        drone.setTargetPosition(new Vec3(order.get("x").getAsDouble(),
+                order.get("y").getAsDouble(), order.get("z").getAsDouble()));
+        drone.setClearTargetOnArrival(true);
+    }
+
+    /** The dimension an event names, or the overworld when it names one we do not have. */
+    private static ServerLevel levelFor(MinecraftServer server, JsonObject order) {
+        String wanted = order.has("dimension") ? order.get("dimension").getAsString() : "";
+        for (ServerLevel level : server.getAllLevels()) {
+            if (level.dimension().identifier().toString().equals(wanted)) {
+                return level;
+            }
+        }
+        return server.overworld();
     }
 
     /** Looks a drone up by its feed id across every dimension. Server thread only. */

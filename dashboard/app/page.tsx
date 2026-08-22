@@ -5,15 +5,19 @@ import styles from "./page.module.css";
 import GeneratedWorlds from "./generated-worlds";
 import LiveMonitoring from "./live-monitoring";
 import WorldMap from "./world-map";
-import { GridIcon, MapIcon, SearchIcon, WorldsIcon } from "./icons";
+import { FlameIcon, GridIcon, MapIcon, SearchIcon, WorldsIcon } from "./icons";
 
 const TABS = [
   { id: "feeds", label: "Camera feeds", title: "Live Monitoring", Icon: GridIcon },
   { id: "map", label: "World map", title: "World Map", Icon: MapIcon },
+  { id: "sim", label: "Disaster sim", title: "Disaster Simulation", Icon: FlameIcon },
   { id: "worlds", label: "Generated worlds", title: "Generated Worlds", Icon: WorldsIcon },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+/** The two tabs that are the same map, differing only in what a click on it does. */
+const MAP_TABS: TabId[] = ["map", "sim"];
 
 export default function Dashboard() {
   const [tab, setTab] = useState<TabId>("feeds");
@@ -54,7 +58,7 @@ export default function Dashboard() {
             role="tab"
             id={`tab-${id}`}
             aria-selected={tab === id}
-            aria-controls={`panel-${id}`}
+            aria-controls={MAP_TABS.includes(id) ? "panel-map" : `panel-${id}`}
             onClick={() => setTab(id)}
           >
             <Icon />
@@ -63,26 +67,44 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {/* Both panels stay mounted: the map keeps its pan, zoom and drone positions
-          while you are off looking at the feeds. */}
-      {TABS.map(({ id }) => (
-        <div
-          key={id}
-          className={styles.panel}
-          id={`panel-${id}`}
-          role="tabpanel"
-          aria-labelledby={`tab-${id}`}
-          hidden={tab !== id}
-        >
-          {id === "feeds" ? (
-            <LiveMonitoring request={request} />
-          ) : id === "map" ? (
-            <WorldMap active={tab === "map"} onOpenDroneFeed={openDroneFeed} />
-          ) : (
-            <GeneratedWorlds active={tab === "worlds"} />
-          )}
-        </div>
-      ))}
+      {/* Every panel stays mounted: the map keeps its pan, zoom and drone positions while
+          you are off looking at the feeds. The map and the simulator share one instance of
+          it rather than each holding their own - two canvases and two world-feed connections
+          would cost twice as much and then drift apart, and switching tabs would lose your
+          place. Only what a click means changes. */}
+      <div
+        className={styles.panel}
+        id="panel-feeds"
+        role="tabpanel"
+        aria-labelledby="tab-feeds"
+        hidden={tab !== "feeds"}
+      >
+        <LiveMonitoring request={request} />
+      </div>
+
+      <div
+        className={styles.panel}
+        id="panel-map"
+        role="tabpanel"
+        aria-labelledby={`tab-${tab === "sim" ? "sim" : "map"}`}
+        hidden={!MAP_TABS.includes(tab)}
+      >
+        <WorldMap
+          active={MAP_TABS.includes(tab)}
+          mode={tab === "sim" ? "simulate" : "drones"}
+          onOpenDroneFeed={openDroneFeed}
+        />
+      </div>
+
+      <div
+        className={styles.panel}
+        id="panel-worlds"
+        role="tabpanel"
+        aria-labelledby="tab-worlds"
+        hidden={tab !== "worlds"}
+      >
+        <GeneratedWorlds active={tab === "worlds"} />
+      </div>
     </main>
   );
 }

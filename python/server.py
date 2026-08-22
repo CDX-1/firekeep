@@ -18,6 +18,9 @@ and calls World Labs itself - see wildfire.py. `marble` is the older path: this
 server calling the Marble API directly with the key in .env, on the model you
 picked. Nothing calls Marble unless a capture, or --backend, asks for it.
 
+    POST /api/events         set off a fire, a storm, an explosion or a dousing
+    GET  /api/events         the disaster log, newest first
+
     GET  /api/jobs           every job, newest first
     GET  /api/jobs/<id>      one job, including the full world payload
     GET  /api/health         {ok, credits, queued, busy}
@@ -438,6 +441,29 @@ class Handler(BaseHTTPRequestHandler):
                                    "hot": delta["hot"], "watchers": live.subscriber_count(),
                                    "commands": commands})
 
+        # set off a disaster; same channel as a drone order, and the outcome comes back
+        # on the push after the one that collected it
+        if url.path == "/api/events":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > MAX_UPLOAD:
+                return self.send_json({"error": "bad body length"}, HTTPStatus.BAD_REQUEST)
+            try:
+                body = json.loads(self.rfile.read(length))
+                event, queued = live.simulate(
+                    body.get("kind", "fire"), body["x"], body["z"],
+                    y=body.get("y"),
+                    radius=body.get("radius", 6),
+                    intensity=body.get("intensity", 3),
+                    dimension=body.get("dimension") or "minecraft:overworld",
+                    label=body.get("label", ""),
+                    source=body.get("source") or self.headers.get("X-Source", "dashboard"),
+                )
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad event: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "event": event, "queued": queued,
+                                   "live": live.snapshot(event["dimension"])["live"]},
+                                  HTTPStatus.ACCEPTED)
+
         # send a drone somewhere; the mod picks this up on its next feed POST
         if url.path == "/api/drones/goto":
             length = int(self.headers.get("Content-Length") or 0)
@@ -513,7 +539,9 @@ class Handler(BaseHTTPRequestHandler):
     def stream(self, dimension):
         """
         Server-sent events: one `hello` with where things stand, then a `delta` for every
-        batch the mod pushes. No Content-Length, so the connection is close-delimited.
+        batch the mod pushes and an `events` whenever a simulated disaster moves on - queued
+        to sent, sent to whatever it did. No Content-Length, so the connection is
+        close-delimited.
         """
         sink = live.subscribe()
         try:
@@ -694,6 +722,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header(f"X-Live-{k.replace('_', '-')}", str(v))
             self.end_headers()
             return self.wfile.write(png)
+
+        if path == "/api/events":
+            q = parse_qs(urlparse(self.path).query)
+            where = (q.get("dimension") or ["minecraft:overworld"])[0]
+            feed = live.snapshot(where)
+            return self.send_json({"events": live.events(where), "live": feed["live"],
+                                   "kinds": list(live.EVENT_KINDS)})
 
         if path == "/api/world/stream":
             q = parse_qs(urlparse(self.path).query)
