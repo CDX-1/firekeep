@@ -9,18 +9,18 @@ import RiskMap from "./risk-map";
 import { ActivityIcon, FlameIcon, GridIcon, MapIcon, ReportIcon, SearchIcon } from "./icons";
 
 const TOOLS = [
+  { id: "feeds", label: "Camera feeds", Icon: GridIcon },
   { id: "fleet", label: "Fleet", Icon: MapIcon },
   { id: "sim", label: "Disaster sim", Icon: FlameIcon },
-  { id: "feeds", label: "Camera feeds", Icon: GridIcon },
   { id: "predictions", label: "Predictions", Icon: ActivityIcon },
   { id: "reports", label: "Incident reports", Icon: ReportIcon },
 ] as const;
 
 type ToolId = (typeof TOOLS)[number]["id"];
-const OVERLAY_TOOLS: ToolId[] = ["feeds", "predictions", "reports"];
+const OVERLAY_TOOLS: ToolId[] = ["predictions", "reports"];
 
 export default function Dashboard() {
-  const [tool, setTool] = useState<ToolId>("fleet");
+  const [tool, setTool] = useState<ToolId>("feeds");
   const [now, setNow] = useState<Date | null>(null);
   const [request, setRequest] = useState<{ id: string } | null>(null);
   const [report, setReport] = useState<{ id: string } | null>(null);
@@ -42,11 +42,12 @@ export default function Dashboard() {
   }, []);
 
   const closeOverlay = useCallback(() => setTool("fleet"), []);
+  const activeLabel = TOOLS.find((entry) => entry.id === tool)?.label ?? "Firekeep";
 
   return (
     <main className={styles.dashboard}>
       <header className={styles.topbar}>
-        <h1>Firekeep</h1>
+        <h1>{activeLabel}</h1>
         <label className={styles.search}>
           <SearchIcon />
           <span className="sr-only">Search footage</span>
@@ -55,7 +56,7 @@ export default function Dashboard() {
         <time dateTime={now?.toISOString()}>{now ? formatDateTime(now) : ""}</time>
       </header>
 
-      <nav className={styles.tools} aria-label="Map tools">
+      <nav className={styles.tools} aria-label="Dashboard views">
         {TOOLS.map(({ id, label, Icon }) => (
           <button key={id} className={styles.tool} type="button" aria-pressed={tool === id} onClick={() => setTool(id)}>
             <Icon />
@@ -64,9 +65,15 @@ export default function Dashboard() {
         ))}
       </nav>
 
-      <section className={styles.workspace} aria-label="Live world map">
-        <WorldMap active mode={tool === "sim" ? "simulate" : "drones"} onOpenDroneFeed={openDroneFeed} />
-      </section>
+      {tool === "feeds" ? (
+        <section className={styles.workspace} aria-label="Camera feeds">
+          <LiveMonitoring request={request} onReport={openReport} />
+        </section>
+      ) : (
+        <section className={styles.workspace} aria-label="Live world map">
+          <WorldMap active mode={tool === "sim" ? "simulate" : "drones"} onOpenDroneFeed={openDroneFeed} />
+        </section>
+      )}
 
       {OVERLAY_TOOLS.includes(tool) && (
         <div className={styles.overlay} role="dialog" aria-modal="true" aria-label={`${tool} tool`}>
@@ -75,7 +82,6 @@ export default function Dashboard() {
             <button type="button" onClick={closeOverlay}>Close</button>
           </div>
           <div className={styles.overlayBody}>
-            {tool === "feeds" && <LiveMonitoring request={request} onReport={openReport} />}
             {tool === "predictions" && <RiskMap active onOpenDroneFeed={openDroneFeed} />}
             {tool === "reports" && <IncidentReports active request={report} />}
           </div>
