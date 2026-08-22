@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import styles from "./page.module.css";
 import LiveMonitoring from "./live-monitoring";
 import WorldMap from "./world-map";
 import { GridIcon, MapIcon, SearchIcon } from "./icons";
+import { DRONES, type Drone } from "./drones";
 
 const TABS = [
   { id: "feeds", label: "Camera feeds", title: "Live Monitoring", Icon: GridIcon },
@@ -16,12 +17,19 @@ type TabId = (typeof TABS)[number]["id"];
 export default function Dashboard() {
   const [tab, setTab] = useState<TabId>("feeds");
   const [now, setNow] = useState<Date | null>(null);
+  const [drones, setDrones] = useState<Drone[]>(DRONES);
+  const [requestedDrone, setRequestedDrone] = useState<string | null>(null);
   const active = TABS.find((entry) => entry.id === tab) ?? TABS[0];
 
   useEffect(() => {
     setNow(new Date());
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  const openDroneFeed = useCallback((name: string) => {
+    setRequestedDrone(name);
+    setTab("feeds");
   }, []);
 
   return (
@@ -65,7 +73,11 @@ export default function Dashboard() {
           aria-labelledby={`tab-${id}`}
           hidden={tab !== id}
         >
-          {id === "feeds" ? <LiveMonitoring /> : <WorldMap active={tab === "map"} />}
+          {id === "feeds" ? (
+            <LiveMonitoring drones={drones} requestedDrone={requestedDrone} />
+          ) : (
+            <WorldMap active={tab === "map"} onDronesChange={setDrones} onOpenDroneFeed={openDroneFeed} />
+          )}
         </div>
       ))}
     </main>

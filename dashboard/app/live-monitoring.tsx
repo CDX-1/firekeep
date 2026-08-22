@@ -2,15 +2,20 @@
 
 import { useEffect, useState } from "react";
 import styles from "./live-monitoring.module.css";
-import { AREAS, DRONES, type Drone, type Filter } from "./drones";
+import { AREAS, type Drone, type Filter } from "./drones";
 import { CameraIcon, Chevron, EmptyImage } from "./icons";
 
-export default function LiveMonitoring() {
+type LiveMonitoringProps = {
+  drones: Drone[];
+  requestedDrone: string | null;
+};
+
+export default function LiveMonitoring({ drones, requestedDrone }: LiveMonitoringProps) {
   const [activeFilter, setActiveFilter] = useState<Filter>("All");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [focusedDrone, setFocusedDrone] = useState<Drone | null>(null);
   const [selectedDrone, setSelectedDrone] = useState<Drone | null>(null);
-  const filteredDrones = activeFilter === "All" ? DRONES : DRONES.filter((drone) => drone.area === activeFilter);
+  const filteredDrones = activeFilter === "All" ? drones : drones.filter((drone) => drone.area === activeFilter);
   const visibleDrones = focusedDrone ? [focusedDrone] : filteredDrones;
   const selectedIndex = selectedDrone ? visibleDrones.findIndex((drone) => drone.name === selectedDrone.name) : -1;
 
@@ -19,6 +24,21 @@ export default function LiveMonitoring() {
     setFocusedDrone(null);
     setSelectedDrone(null);
   };
+
+  useEffect(() => {
+    if (!requestedDrone) return;
+    const drone = drones.find((item) => item.name === requestedDrone);
+    if (!drone) return;
+    setActiveFilter(drone.area);
+    setFocusedDrone(drone);
+    setSelectedDrone(null);
+  }, [drones, requestedDrone]);
+
+  useEffect(() => {
+    if (!focusedDrone) return;
+    const current = drones.find((drone) => drone.name === focusedDrone.name);
+    if (current && current !== focusedDrone) setFocusedDrone(current);
+  }, [drones, focusedDrone]);
 
   const moveViewer = (offset: number) => {
     if (selectedIndex < 0) return;
@@ -53,10 +73,10 @@ export default function LiveMonitoring() {
           </button>
           {!sidebarCollapsed && <nav className={styles.regionList}>
             <button className={styles.allDrones} data-active={activeFilter === "All"} type="button" onClick={() => selectArea("All")}>
-              <span>All</span><span>{DRONES.length}</span>
+              <span>All</span><span>{drones.length}</span>
             </button>
             {AREAS.map((area) => {
-              const areaDrones = DRONES.filter((drone) => drone.area === area);
+              const areaDrones = drones.filter((drone) => drone.area === area);
               return <section className={styles.area} key={area}>
                 <button className={styles.areaSelect} data-active={activeFilter === area} type="button" onClick={() => selectArea(area)}>
                   <span>{area}</span><span>{areaDrones.length}</span>

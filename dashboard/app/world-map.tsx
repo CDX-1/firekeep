@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import styles from "./world-map.module.css";
-import { AREA_QUADRANT, AREAS, DRONES, type Area } from "./drones";
+import { AREA_QUADRANT, AREAS, DRONES, type Area, type Drone } from "./drones";
 import { getWorld, worldMapUrl } from "@/lib/api";
 import type { WorldMeta } from "@/lib/types";
 import { fallbackWorld } from "./fallback-world";
@@ -62,7 +62,13 @@ type Drag =
 /** What we are drawing under the drones: either the real save, or a stand-in. */
 type Backdrop = { meta: WorldMeta; image: CanvasImageSource; real: boolean };
 
-export default function WorldMap({ active }: { active: boolean }) {
+type WorldMapProps = {
+  active: boolean;
+  onDronesChange: (drones: Drone[]) => void;
+  onOpenDroneFeed: (name: string) => void;
+};
+
+export default function WorldMap({ active, onDronesChange, onOpenDroneFeed }: WorldMapProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ x: 0, y: 0, scale: 1 });
@@ -190,8 +196,9 @@ export default function WorldMap({ active }: { active: boolean }) {
         yaw: south ? Math.PI / 2 : -Math.PI / 2,
       };
     });
+    onDronesChange(DRONES);
     setSelected(null);
-  }, [backdrop]);
+  }, [backdrop, onDronesChange]);
 
   // ---------------------------------------------------------------- viewport
 
@@ -257,6 +264,9 @@ export default function WorldMap({ active }: { active: boolean }) {
       last = time;
 
       fly(dronesRef.current, dt);
+      if (updateDroneAreas(dronesRef.current, backdrop.meta)) {
+        onDronesChange(dronesRef.current.map(({ name, area }) => ({ name, area })));
+      }
       layerRef.current?.flush();
       draw(canvasRef.current, backdrop, viewRef.current, dronesRef.current, {
         selected,
@@ -277,7 +287,7 @@ export default function WorldMap({ active }: { active: boolean }) {
 
     frame = requestAnimationFrame(step);
     return () => cancelAnimationFrame(frame);
-  }, [active, backdrop, selected]);
+  }, [active, backdrop, onDronesChange, selected]);
 
   // ---------------------------------------------------------------- pointers
 
@@ -385,6 +395,15 @@ export default function WorldMap({ active }: { active: boolean }) {
     zoomBy(Math.exp(-event.deltaY * 0.0015), event.clientX - box.left, event.clientY - box.top);
   };
 
+  const onDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const name = pick(event.clientX - box.left, event.clientY - box.top);
+    if (!name || !dronesRef.current.some((drone) => drone.name === name)) return;
+    event.preventDefault();
+    setSelected(name);
+    onOpenDroneFeed(name);
+  };
+
   useEffect(() => {
     if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -447,6 +466,7 @@ export default function WorldMap({ active }: { active: boolean }) {
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
           onPointerLeave={() => { cursorRef.current = null; hoverRef.current = null; setCursor(null); }}
+          onDoubleClick={onDoubleClick}
           onWheel={onWheel}
         />
 
@@ -610,6 +630,23 @@ function fly(drones: MapDrone[], dt: number) {
     drone.z += drone.vz * dt;
     drone.yaw = Math.atan2(drone.vz, drone.vx);
   }
+}
+
+function updateDroneAreas(drones: MapDrone[], meta: WorldMeta) {
+  let changed = false;
+  const middleX = meta.origin_x + meta.width / 2;
+  const middleZ = meta.origin_z + meta.height / 2;
+
+  for (const drone of drones) {
+    const area: Area = drone.z < middleZ
+      ? drone.x >= middleX ? "Northeast" : "Northwest"
+      : drone.x >= middleX ? "Southeast" : "Southwest";
+    if (drone.area !== area) {
+      drone.area = area;
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 // --------------------------------------------------------------------------
