@@ -55,10 +55,13 @@ export default function DroneControls({
   drone,
   controlling,
   onToggleControl,
+  compact = false,
 }: {
   drone: DroneCamera;
   controlling: boolean;
   onToggleControl: (next: boolean) => void;
+  /** A grid tile: room for the bar, but not for a pad on top of a thumbnail. */
+  compact?: boolean;
 }) {
   const [step, setStep] = useState<number>(DEFAULT_STEP);
   const [error, setError] = useState<string | null>(null);
@@ -184,7 +187,7 @@ export default function DroneControls({
   }, [controlling, held, move]);
 
   return (
-    <div className={styles.controls} data-controlling={controlling} aria-label={`Fly ${drone.id}`}>
+    <div className={styles.controls} data-controlling={controlling} data-compact={compact} aria-label={`Fly ${drone.id}`}>
       <div className={styles.pad} data-live={controlling}>
         <button type="button" className={styles.up} disabled={!controlling} data-held={held.includes("w")} onClick={() => move(KEYS.w)} aria-label="Forward" title="Forward (W)"><Arrow direction="up" /></button>
         <button type="button" className={styles.left} disabled={!controlling} data-held={held.includes("a")} onClick={() => move(KEYS.a)} aria-label="Left" title="Left (A)"><Arrow direction="left" /></button>

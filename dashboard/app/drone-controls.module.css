@@ -1,44 +1,76 @@
-.controls { display: flex; align-items: center; gap: clamp(12px, 2vw, 22px); padding: 10px 11px; background: var(--bg); border-top: 1px solid var(--line); }
-.controls[data-controlling="true"] { background: linear-gradient(90deg, var(--accent-soft), transparent 55%); }
+/*
+ * A head-up display: the controls sit on the picture rather than under it.
+ *
+ * Flying is something you do while watching, so the feed should not be the smaller half of a panel
+ * that is mostly buttons - and looking away from the picture to find a key is exactly when a drone
+ * meets a wall. Everything here floats over the image, keeps out of the middle of the frame, and
+ * fades back when nobody is reaching for it.
+ */
+.controls { position: absolute; inset: 0; z-index: 2; display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto 1fr; align-items: start; gap: 10px; padding: clamp(9px, 1.4vw, 16px); pointer-events: none; }
 
-.pad { display: grid; grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); gap: 3px; flex: 0 0 auto; }
+/* Only the controls take the mouse; the picture behind them stays clickable. */
+.controls > * { pointer-events: auto; }
+
+/* Enough shading to stay legible over whatever the drone is looking at, and no more. */
+.controls::before { content: ""; position: absolute; inset: 0; z-index: -1; background: linear-gradient(to bottom, rgba(6, 8, 7, .66) 0%, rgba(6, 8, 7, .22) 22%, transparent 42%), linear-gradient(to top, rgba(6, 8, 7, .6) 0%, transparent 34%); opacity: 0; transition: opacity 160ms ease; }
+.controls:hover::before, .controls:focus-within::before, .controls[data-controlling="true"]::before { opacity: 1; }
+
+/* Idle, the pad is out of the way; it comes back the moment the pointer arrives. */
+.pad, .altitude { opacity: 0; transform: translateY(3px); transition: opacity 160ms ease, transform 160ms ease; }
+.controls:hover .pad, .controls:hover .altitude,
+.controls:focus-within .pad, .controls:focus-within .altitude,
+.controls[data-controlling="true"] .pad, .controls[data-controlling="true"] .altitude { opacity: 1; transform: none; }
+
+.pad { grid-column: 1; grid-row: 2; align-self: end; display: grid; grid-template-columns: repeat(3, 32px); grid-template-rows: repeat(3, 32px); gap: 3px; }
 .up { grid-area: 1 / 2; }
 .left { grid-area: 2 / 1; }
 .hold { grid-area: 2 / 2; }
 .right { grid-area: 2 / 3; }
 .down { grid-area: 3 / 2; }
 
-.controls button { display: grid; place-items: center; padding: 0; color: var(--muted); background: rgba(255, 255, 255, .05); border: 0; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 5px; font: inherit; font-size: 10px; cursor: pointer; transition: color 100ms ease, background-color 100ms ease, outline-color 100ms ease; }
-.controls button:hover:not(:disabled) { color: var(--text); background: rgba(255, 255, 255, .1); outline-color: rgba(143, 184, 174, .5); }
-.controls button:active:not(:disabled) { background: var(--accent-soft); }
-.controls button:disabled { opacity: .38; cursor: default; }
-.controls button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
+.controls button { display: grid; place-items: center; padding: 0; color: #d7ded9; background: rgba(12, 15, 13, .58); border: 0; outline: 1px solid rgba(255, 255, 255, .16); outline-offset: -1px; border-radius: 6px; font: inherit; font-size: 10px; cursor: pointer; backdrop-filter: blur(7px); transition: color 100ms ease, background-color 100ms ease, outline-color 100ms ease; }
+.controls button:hover:not(:disabled) { color: #fff; background: rgba(28, 34, 31, .82); outline-color: rgba(143, 184, 174, .6); }
+.controls button:active:not(:disabled) { background: rgba(58, 96, 86, .9); }
+.controls button:disabled { opacity: .32; cursor: default; }
+.controls button:focus-visible { outline: 1px solid #fff; outline-offset: -2px; }
 .controls svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
 /* a key that is physically down right now */
-.controls button[data-held="true"] { color: #cae0da; background: var(--accent-soft); outline-color: var(--accent); }
+.controls button[data-held="true"] { color: #eaf5f1; background: rgba(58, 96, 86, .92); outline-color: var(--accent); }
 
 .hold { font-size: 9px; letter-spacing: .02em; }
 
-.altitude { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; }
-.altitude button { grid-auto-flow: column; gap: 6px; justify-content: flex-start; height: 30px; padding: 0 9px; }
+.altitude { grid-column: 3; grid-row: 2; align-self: end; display: flex; flex-direction: column; gap: 3px; }
+.altitude button { grid-auto-flow: column; gap: 6px; justify-content: flex-start; height: 32px; padding: 0 10px; }
 .altitude svg { width: 13px; height: 13px; }
 
-.settings { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.topRow { display: flex; align-items: center; gap: 8px; }
-.take { height: 24px; padding: 0 11px; font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
-.take[data-on="true"] { color: #cae0da; background: var(--accent-soft); outline-color: var(--accent); }
+/* The bar across the top: what the drone was last told, then the controls for saying it. */
+.settings { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.topRow { order: 2; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
+.take { height: 26px; padding: 0 12px; font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
+.take[data-on="true"] { color: #eaf5f1; background: rgba(58, 96, 86, .9); outline-color: var(--accent); }
 
 .steps { display: flex; gap: 3px; }
-.steps button { width: 30px; height: 24px; font-size: 10px; font-variant-numeric: tabular-nums; }
-.steps button[data-active="true"] { color: #cae0da; background: var(--accent-soft); outline-color: transparent; }
+.steps button { width: 30px; height: 26px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.steps button[data-active="true"] { color: #eaf5f1; background: rgba(58, 96, 86, .9); outline-color: var(--accent); }
 
-.status { margin: 0; overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
-.status[data-error="true"] { color: var(--warm); }
+.status { order: 1; flex: 0 1 auto; margin: 0; padding: 6px 9px; overflow: hidden; color: #c9d2cd; background: rgba(12, 15, 13, .58); border-radius: 6px; backdrop-filter: blur(7px); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; opacity: 0; transition: opacity 160ms ease; }
+.controls:hover .status, .controls:focus-within .status, .controls[data-controlling="true"] .status { opacity: 1; }
+.status[data-error="true"] { color: #f0b6ac; opacity: 1; }
+
+/* A thumbnail has no room for a pad; the bar is enough to take control from. */
+.controls[data-compact="true"] { padding: 7px; gap: 6px; }
+.controls[data-compact="true"] .pad, .controls[data-compact="true"] .altitude { display: none; }
+.controls[data-compact="true"] .status { font-size: 9px; }
 
 @media (max-width: 720px) {
-  .controls { flex-wrap: wrap; gap: 12px; }
-  .settings { flex-basis: 100%; }
+  .controls { padding: 8px; gap: 7px; }
+  .pad { grid-template-columns: repeat(3, 28px); grid-template-rows: repeat(3, 28px); }
+  .altitude button { height: 28px; }
+  .altitude button span { display: none; }
+  .status { display: none; }
 }
 
-@media (prefers-reduced-motion: reduce) { .controls button { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .controls button, .controls::before, .pad, .altitude, .status { transition: none; }
+}

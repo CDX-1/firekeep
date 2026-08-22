@@ -1,5 +1,9 @@
 /**
- * Fair, bounded fetching of the grid's still frames.
+ * Fair, bounded fetching of the grid's still frames - the polling transport's half of the page.
+ *
+ * Nothing here runs while the dashboard is streaming: the multiplexed feed in lib/camera-feed
+ * delivers every tile's frames down one connection, which is what this whole queue exists to
+ * work around. It is what the page falls back to, and none of the below stops being true then.
  *
  * A browser opens about six connections to one origin, and a cold `/frame.jpg` holds one for
  * up to a second while the agent renders that drone's first frame. A wall of tiles left to
@@ -13,7 +17,7 @@
  * poll and for the expanded viewer's stream, which is the one the operator is looking at.
  */
 
-import { snapshotUrl } from "./cameras";
+import { snapshotUrl, type Profile } from "./cameras";
 
 /**
  * How many still frames may be loading at once.
@@ -88,11 +92,16 @@ export function pauseFrames(value: boolean) {
 }
 
 /** One still frame for a drone, once this caller's turn comes round. */
-export async function fetchFrame(id: string, signal: AbortSignal, priority = false): Promise<Blob> {
+export async function fetchFrame(
+  id: string,
+  signal: AbortSignal,
+  priority = false,
+  profile?: Profile,
+): Promise<Blob> {
   await acquire(signal, priority);
   try {
     // The agent serves the newest frame it has; the timestamp is only here to defeat caches.
-    const res = await fetch(snapshotUrl(id, Date.now()), { cache: "no-store", signal });
+    const res = await fetch(snapshotUrl(id, Date.now(), profile), { cache: "no-store", signal });
     if (!res.ok) throw new Error(`frame for ${id} -> ${res.status}`);
     return await res.blob();
   } finally {

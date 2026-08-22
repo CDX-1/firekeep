@@ -24,7 +24,9 @@ import java.util.concurrent.Executors;
  *
  * <p>Only feeds somebody is actually watching are rendered, so a world full of drones costs nothing
  * until the dashboard opens. Among those, the drone whose last frame is oldest goes first, which
- * spreads the one-render-per-tick budget evenly however many feeds are open.
+ * spreads the one-render-per-tick budget evenly however many feeds are open - except that a feed
+ * somebody has singled out outranks the thumbnails, because it is asking for a frame several times
+ * as often and would otherwise judder while a wall of tiles took its turns.
  */
 public final class DroneFeeds {
     private static final Map<UUID, DroneFeed> FEEDS = new ConcurrentHashMap<>();
@@ -36,11 +38,24 @@ public final class DroneFeeds {
     private static long fpsWindowStart;
     private static volatile int clientFps;
 
-    private static final ExecutorService ENCODERS = Executors.newFixedThreadPool(2, runnable -> {
-        Thread thread = new Thread(runnable, "firekeep-drone-encoder");
-        thread.setDaemon(true);
-        return thread;
-    });
+    /**
+     * The encoders.
+     *
+     * <p>One 1280x720 frame takes roughly 35ms to turn into a JPEG, so a single thread tops out
+     * near 28 frames a second and two near 60 - which is what made a feed asking for 60 judder no
+     * matter how fast the game was rendering. Encoding one frame does not depend on any other, so
+     * this scales almost linearly: measured, four threads sustain about 128 frames a second at
+     * 720p. They are the cheapest part of the machine to spend here, since the alternative is a
+     * GPU that has already done its work sitting waiting for them.
+     */
+    private static final ExecutorService ENCODERS = Executors.newFixedThreadPool(
+            CameraConfig.ENCODERS, runnable -> {
+                Thread thread = new Thread(runnable, "firekeep-drone-encoder");
+                thread.setDaemon(true);
+                // Below the render thread: an encoder must never be what delays the next frame.
+                thread.setPriority(Thread.NORM_PRIORITY - 1);
+                return thread;
+            });
 
     private DroneFeeds() {
     }
@@ -93,16 +108,23 @@ public final class DroneFeeds {
         DroneEntity next = null;
         DroneFeed nextFeed = null;
         long oldest = Long.MAX_VALUE;
+        long best = Long.MIN_VALUE;
 
         for (DroneEntity drone : drones) {
             DroneFeed feed = FEEDS.get(drone.getUUID());
             if (feed == null || !feed.isWatched(now)) {
                 continue;
             }
-            if (now - feed.lastCaptureStart() < CameraConfig.FRAME_INTERVAL_MILLIS) {
+            CameraConfig.Profile profile = feed.profile();
+            if (now - feed.lastCaptureStart() < profile.intervalMillis()) {
                 continue;
             }
-            if (feed.lastCaptureStart() < oldest) {
+            // The feed somebody has singled out goes first when two are both due. It asks for a
+            // frame far more often than a thumbnail does, and losing those turns to a wall of
+            // tiles is exactly what would make the one being watched judder.
+            long weight = profile.weight();
+            if (weight > best || (weight == best && feed.lastCaptureStart() < oldest)) {
+                best = weight;
                 oldest = feed.lastCaptureStart();
                 next = drone;
                 nextFeed = feed;
@@ -171,8 +193,10 @@ public final class DroneFeeds {
     }
 
     private static void capture(DroneEntity drone, DroneFeed feed, long now) {
+        CameraConfig.Profile profile = feed.profile();
+        long capture = feed.nextCapture();
         feed.markCaptureStarted(now);
-        boolean started = DroneCamera.capture(drone, CameraConfig.WIDTH, CameraConfig.HEIGHT, image -> {
+        boolean started = DroneCamera.capture(drone, profile.width(), profile.height(), image -> {
             int width;
             int height;
             int[] pixels;
@@ -187,7 +211,8 @@ public final class DroneFeeds {
 
             ENCODERS.execute(() -> {
                 try {
-                    feed.publish(Frames.toJpeg(pixels, width, height, CameraConfig.QUALITY), width, height);
+                    feed.publish(capture, Frames.toJpeg(pixels, width, height, profile.quality()),
+                            width, height);
                 } catch (Throwable t) {
                     Firekeep.LOGGER.warn("could not encode the frame for {}: {}", feed.id(), t.toString());
                 }
@@ -196,7 +221,7 @@ public final class DroneFeeds {
 
         if (!started) {
             // Try again next tick rather than leaving this feed marked as freshly captured.
-            feed.markCaptureStarted(now - CameraConfig.FRAME_INTERVAL_MILLIS);
+            feed.markCaptureStarted(now - profile.intervalMillis());
         }
     }
 

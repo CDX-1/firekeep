@@ -20,24 +20,52 @@
 .droneList button[data-active="true"] i { background: var(--warm); box-shadow: 0 0 0 3px rgba(208, 160, 106, .11); }
 .droneList button:hover { color: var(--text); background: rgba(255, 255, 255, .025); }
 
+.transport { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; padding: 10px 13px 12px; border-top: 1px solid var(--line); }
+.transportState { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; letter-spacing: .01em; }
+.transportState i { width: 5px; height: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); }
+.transportState[data-state="live"] i { background: var(--accent); box-shadow: 0 0 0 3px rgba(143, 184, 174, .13); }
+.transportState[data-state="connecting"] i, .transportState[data-state="retrying"] i { background: var(--warm); }
+.transportState[data-state="failed"] i { background: #b4645a; }
+.transportChoice { display: flex; gap: 2px; padding: 2px; background: rgba(255, 255, 255, .035); border-radius: 5px; }
+.transportChoice button { flex: 1; padding: 4px 0; color: var(--muted); background: transparent; border: 0; border-radius: 4px; font: inherit; font-size: 10px; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
+.transportChoice button:hover { color: var(--text); }
+.transportChoice button[data-active="true"] { color: #cae0da; background: var(--accent-soft); }
+.transportChoice button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
+
 .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; min-height: 0; overflow-y: auto; align-content: start; padding: 2px 8px 12px 2px; }
 .grid[data-count="3"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .grid[data-focused="true"] { grid-template-columns: minmax(0, min(100%, calc(177.778dvh - 160px))); justify-content: center; }
 .feed { min-width: 0; }
-.viewport { position: relative; display: block; width: 100%; padding: 0; overflow: hidden; background: linear-gradient(145deg, #1a1b1a, var(--image-bg)); border: 1px solid transparent; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 8px; cursor: pointer; transition: outline-color 120ms ease, box-shadow 120ms ease; }
+.viewport { position: relative; display: block; width: 100%; padding: 0; overflow: hidden; background: linear-gradient(145deg, #1a1b1a, var(--image-bg)); border: 1px solid transparent; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 8px; transition: outline-color 120ms ease, box-shadow 120ms ease; }
 .viewport:hover { outline-color: rgba(143, 184, 174, .5); box-shadow: 0 9px 25px rgba(0, 0, 0, .16); }
-.viewport:focus-visible, .viewerArrow:focus-visible, .sidebarToggle:focus-visible, .allDrones:focus-visible, .areaSelect:focus-visible, .droneList button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
-.feedImage { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.viewport:has(.open:focus-visible) { outline: 1px solid var(--text); outline-offset: -2px; }
+.viewerArrow:focus-visible, .sidebarToggle:focus-visible, .allDrones:focus-visible, .areaSelect:focus-visible, .droneList button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
+
+/* Opening the feed: a target the size of the picture, under the HUD rather than around it. */
+.open { position: absolute; inset: 0; z-index: 1; padding: 0; background: transparent; border: 0; outline: 0; cursor: pointer; }
+
+/*
+ * The picture itself: a box of a known shape with the images stacked inside it.
+ *
+ * Fixed-ratio rather than sized by whichever image happens to have loaded, so a stream taking
+ * over from the stills cannot reflow the grid - and so the box has a real width on the first
+ * render, which is what the feed measures to decide what resolution to ask for.
+ */
+.feedBox { position: relative; display: block; width: 100%; height: 100%; aspect-ratio: 16 / 9; overflow: hidden; }
+.feedImage { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: cover; transition: opacity 120ms ease; }
 .notice { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
-.tileControls { margin-top: 8px; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 8px; overflow: hidden; }
-.feedLabel { position: absolute; right: 0; bottom: 0; left: 0; display: flex; align-items: center; padding: 8px 10px; color: #d1d5d0; background: linear-gradient(90deg, rgba(10, 11, 10, .83), rgba(10, 11, 10, .62)); font-size: 10px; letter-spacing: .01em; line-height: 1; text-align: left; }
+.feedLabel { position: absolute; right: 0; bottom: 0; left: 0; z-index: 1; display: flex; align-items: center; padding: 8px 10px; color: #d1d5d0; background: linear-gradient(90deg, rgba(10, 11, 10, .83), rgba(10, 11, 10, .62)); font-size: 10px; letter-spacing: .01em; line-height: 1; text-align: left; pointer-events: none; }
 
 .overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 36px 64px; background: rgba(5, 7, 6, .9); animation: overlayIn 120ms ease-out both; }
 .viewer { display: grid; grid-template-columns: 46px minmax(0, min(84vw, calc(177.778dvh - 173px))) 46px; align-items: center; gap: 22px; width: fit-content; max-width: 100%; }
 .viewer[data-single="true"] { grid-template-columns: minmax(0, min(84vw, calc(177.778dvh - 173px))); }
-.viewerPanel { overflow: hidden; outline: 1px solid rgba(255, 255, 255, .2); outline-offset: -1px; border-radius: 9px; background: var(--image-bg); box-shadow: 0 24px 80px rgba(0, 0, 0, .4); animation: panelReveal 140ms ease-out both; }
-.viewerImage { aspect-ratio: 16 / 9; }
-.viewerPanel p { margin: 0; padding: 9px 11px; color: var(--muted); background: var(--bg); font-size: 11px; }
+/* Nothing under the picture any more: the controls are on it, so the panel is the feed. */
+.viewerPanel { position: relative; overflow: hidden; outline: 1px solid rgba(255, 255, 255, .2); outline-offset: -1px; border-radius: 9px; background: var(--image-bg); box-shadow: 0 24px 80px rgba(0, 0, 0, .4); animation: panelReveal 140ms ease-out both; }
+
+/* Where it is and what it is being rendered at, sat along the bottom of the frame. */
+.readout { position: absolute; right: 0; bottom: 0; left: 0; z-index: 2; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 8px 11px; color: #c9d2cd; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1; text-shadow: 0 1px 3px rgba(0, 0, 0, .85); pointer-events: none; }
+.readout b { padding: 2px 7px; border-radius: 4px; background: rgba(12, 15, 13, .6); font-weight: 400; letter-spacing: .02em; }
+.readout b[data-detail="true"] { color: #d9efe8; background: rgba(58, 96, 86, .8); }
 .viewerArrow { width: 46px; height: 46px; display: grid; place-items: center; padding: 0; color: var(--text); background: rgba(30, 34, 32, .95); border: 1px solid transparent; outline: 1px solid var(--line); outline-offset: -1px; border-radius: 50%; cursor: pointer; transition: color 100ms ease, outline-color 100ms ease, background-color 100ms ease, transform 100ms ease; }
 .viewerArrow:hover { color: #d6ebe5; outline-color: var(--accent); background: rgba(43, 54, 50, .96); }
 .viewerArrow:active { transform: scale(.93); }

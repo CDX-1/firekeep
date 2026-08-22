@@ -52,9 +52,18 @@ public final class AgentConfig {
     private AgentConfig() {
     }
 
-    /** The frame rate an agent should run at: a little above the feed rate, so captures never wait. */
+    /**
+     * The frame rate an agent should run at: a little above the fastest feed it may be asked for.
+     *
+     * <p>Captures ride on rendered frames - one drone per frame - so this cap is a hard ceiling on
+     * every feed at once. Deriving it from the thumbnail rate alone was capping the client at 35,
+     * which no amount of asking for 60 could get past: a feed somebody had singled out simply
+     * could not be rendered more often than the game was drawing.
+     */
     public static int effectiveFpsCap() {
-        return FPS_CAP > 0 ? FPS_CAP : Math.min(260, CameraConfig.FPS + 5);
+        return FPS_CAP > 0
+                ? FPS_CAP
+                : Math.min(260, Math.max(CameraConfig.FPS, CameraConfig.DETAIL_FPS) + 5);
     }
 
     private static boolean boolValue(String name, boolean fallback) {

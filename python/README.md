@@ -18,6 +18,24 @@ Stdlib only — nothing to install. The key comes from `.env`:
 WORLDLABS_API_KEY=...
 ```
 
+Everything else reaches Minecraft through this server, which is the only process that talks
+to both sides. The dashboard calls it and nothing else; it calls the Marble API, reads the
+save off disk, takes the mod's world feed, and pulls the drone cameras off the agents:
+
+```
+browser ──▶ dashboard (proxy only) ──▶ server.py ──┬─▶ Marble API
+                                                   ├─▶ the save's region files
+                                                   ├─▶ the mod's world feed  (it POSTs here)
+                                                   └─▶ the camera agents      :8087, :8088+
+```
+
+Where the agents are, if they are not next door:
+
+| | |
+|---|---|
+| `FIREKEEP_AGENTS` | the Fabric server's agent directory (default `http://127.0.0.1:8087`) |
+| `FIREKEEP_CAMERAS` | the one agent to use when there is no directory (default `http://127.0.0.1:8088`) |
+
 Wiring up the mod? Run with `--dry-run` and hammer it as hard as you like.
 
 ### Flags
@@ -185,6 +203,98 @@ gzips it - and a buffered event stream never reaches the browser.
 Everything the feed has seen, as one RGBA image, transparent where nothing is known. The
 dashboard loads this once on connect and patches it from the stream after that.
 
+### `GET /api/cameras`
+
+The drone cameras, merged from every agent. Each drone is filmed by its own Minecraft
+client on its own port; the server resolves the agent directory the Fabric server
+publishes at `:8087/agents` and asks all of them, so the dashboard sees one roster.
+
+```json
+{ "drones": [{ "id": "alpha", "x": 12.5, "y": 91.0, "z": -7.25, "yaw": 132.0,
+               "width": 480, "height": 270, "fps": 30, "live": true, "frames": 812 }],
+  "clientFps": 58, "agents": 2, "online": true, "watchers": 1, "revision": 41 }
+```
+
+Positions are merged from the mod's live feed when it is running, so they are as fresh as
+the world feed rather than as fresh as the last time an agent was asked.
+
+### `GET /api/cameras/feed?ids=alpha,bravo`
+
+Every one of those drones' frames, and the roster, down a single connection - the
+dashboard's grid, whatever its size, is one socket and no polling at all.
+
+A `multipart/x-mixed-replace` stream. Parts carry `X-Firekeep-Event: roster` (a JSON body,
+sent on connect and whenever anything changes) or `X-Firekeep-Event: frame` with
+`X-Drone-Id`. `?fps=` caps how often each drone's frames are forwarded, 8 by default.
+
+```sh
+curl -N "localhost:8000/api/cameras/feed?ids=alpha&fps=2" --output -
+```
+
+One upstream stream is held open per drone *anyone* is watching, not per dashboard: ten
+tabs on six drones is six conversations with Minecraft, not sixty. A drone nobody has
+subscribed to is not pulled at all, so an idle dashboard costs the game nothing.
+
+### `GET /api/cameras/<id>/stream`
+
+That one drone's MJPEG, passed straight through - for a plain `<img>`.
+
+### `GET /api/cameras/<id>/frame.jpg`
+
+The newest single frame, served from the open stream if there is one and fetched from the
+agent if there is not. This is what a dashboard in polling mode asks for.
+
+### `?profile=detail`
+
+Both of the above take it, and it is forwarded to the agent unchanged. It means *somebody is
+looking at this one*, and the agent renders that feed at 1280×720, 60fps and high JPEG quality
+instead of the 480×270 thumbnail it gives the grid.
+
+```sh
+curl -N "localhost:8000/api/cameras/alpha/stream?profile=detail" --output -
+```
+
+The request stands for a few seconds on the agent and is renewed by every frame the stream
+carries, so a feed drops back to thumbnails on its own once the connection closes. Heavier
+requests win while they last, so a grid tile still asking for its thumbnail cannot pull a feed
+back down underneath the viewer. `GET /api/cameras` reports what each feed is *actually* being
+rendered at, so `width`/`height`/`fps` change while a drone is being watched closely and
+`detail` says whether it is.
+
+A detail request is never answered from a thumbnail already in hand - it goes to the agent and
+asks properly - while a thumbnail request is happily answered from a detail stream that is
+already open.
+
+The dashboard also sends `&width=&height=` for the size it is actually showing the feed at,
+snapped to 854x480, 1280x720 or 1600x900 - a 1280-wide frame stretched over a 2000-pixel panel
+is soft, and a 1600-wide one in a thumbnail is bytes nobody sees. Anything past 1920x1080 is
+clamped here before it reaches the agent.
+
+Tuning is on the agent, as system properties or environment variables:
+`firekeep.camera.detail.width` / `.height` / `.fps` / `.quality`, or
+`FIREKEEP_CAMERA_DETAIL_WIDTH` and friends. `firekeep.camera.encoders` sets how many frames may
+be turned into JPEGs at once, which is the setting that decides whether a fast feed can keep up
+at all - see below.
+
+### What actually limits a feed
+
+Measured, on one frame:
+
+| | encode | one thread | four threads |
+|---|---|---|---|
+| 480x270 q0.70 | 3.1 ms | 323 fps | plenty |
+| 1280x720 q0.85 | 27.7 ms | 36 fps | ~144 fps |
+| 1600x900 q0.85 | 43.3 ms | 23 fps | ~92 fps |
+
+JPEG encoding, not rendering and not the network, is the narrow part. It was being done on two
+threads, so a feed asking for 60 could not have it however fast the game was drawing - and the
+agent's own frame-rate cap was derived from the thumbnail rate, pinning the whole client at 35.
+Both are fixed; the encoder pool now scales with the machine.
+
+The remaining ceiling is the game itself: captures ride on rendered frames, one drone per frame,
+so every feed on an agent shares its frame rate. A wall of twelve thumbnails is inherently a few
+frames a second each - which is why the feed being watched is allowed to jump the queue.
+
 ### `GET /api/world/map.png`
 
 That map: one pixel per block, painted with vanilla's own map palette and
@@ -294,6 +404,7 @@ Writes into the same `out/jobs/<id>/` layout.
 | `main.py` | one-shot CLI |
 | `worldmap.py` | renders a save's region files into a top-down PNG (also a CLI) |
 | `live.py` | the live world layer: the mod's feed, and the stream out to dashboards |
+| `cameras.py` | the drone cameras: the agent directory, one pull per drone, one stream out |
 | `mapcolors.py` | block id -> vanilla map colour |
 | `nbt.py` | minimal NBT reader, decode only |
 | `viewer.html` | rough built-in viewer, served at `/` |

@@ -18,8 +18,15 @@ The mod POSTs raw PNG bytes:
     GET  /jobs/<id>/pano.png source.png, preview.jpg, job.json
     GET  /api/world          top-down map metadata for the live save
     GET  /api/world/map.png  that map, one pixel per block
+    GET  /api/world/stream   the mod's live world feed, as server-sent events
+    GET  /api/cameras        the drone roster, merged from every agent
+    GET  /api/cameras/feed   those drones' frames and the roster, one connection
     GET  /latest.png         the most recent finished render
     GET  /                   the viewer
+
+This is the midpoint: the dashboard talks to this and nothing else, and everything
+that has to reach Minecraft - the save, the mod's feed, the camera agents - is reached
+from here.
 
 Every finished job also drops a plain PNG in out/renders/, and copies it to
 out/latest.png, so there is always one obvious file to look at.
@@ -37,8 +44,9 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
+import cameras
 import live
 import marble
 import worldmap
@@ -303,6 +311,10 @@ def world_map(dimension, save=None, refresh=False):
 class Handler(BaseHTTPRequestHandler):
     server_version = "firekeep"
     protocol_version = "HTTP/1.1"
+    # Nagle holds a small write back for up to 40ms hoping to coalesce it with the next one.
+    # Every stream here is small writes that are wanted immediately - a JPEG frame, an SSE
+    # event - so that delay is pure added latency on the thing being watched.
+    disable_nagle_algorithm = True
 
     def log_message(self, fmt, *a):
         pass
@@ -428,6 +440,92 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             live.unsubscribe(sink)
 
+    # -- GET /api/cameras/feed ----------------------------------------------
+    def camera_feed(self, ids, fps):
+        """
+        Every subscribed drone's frames, and the roster, down one connection.
+
+        A multipart stream rather than anything cleverer because the browser can read it with
+        plain `fetch` and split it itself - no socket upgrade to get through the dev proxy, and
+        no base64 inflating every frame by a third. Parts are labelled with X-Firekeep-Event,
+        and frames additionally with X-Drone-Id.
+        """
+        watcher = cameras.watch(ids, fps)
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type",
+                             f"multipart/x-mixed-replace; boundary={cameras.BOUNDARY}")
+            # no-transform for the same reason the world stream sets it: the dev proxy gzips
+            # anything it is allowed to, and a buffered stream never reaches the browser.
+            self.send_header("Cache-Control", "no-store, no-transform")
+            self.send_header("Content-Encoding", "identity")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+
+            for chunk in cameras.parts(watcher):
+                # A quiet fleet still has to prove the connection is alive; a comment line is
+                # ignored by the parser at the other end.
+                self.wfile.write(chunk if chunk is not None else cameras.KEEPALIVE)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass                                    # the dashboard went away
+        finally:
+            cameras.unwatch(watcher)
+
+    def camera_frame(self, drone_id, profile=None, size=None):
+        """One still, for a tile in polling mode or a first paint while a stream opens."""
+        try:
+            jpeg = cameras.frame(drone_id, profile, size)
+        except OSError as e:
+            return self.send_json({"error": f"agent unreachable: {e}"}, HTTPStatus.BAD_GATEWAY)
+        if not jpeg:
+            return self.send_json({"error": "no frame yet"}, HTTPStatus.SERVICE_UNAVAILABLE)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(jpeg)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(jpeg)
+
+    def camera_stream(self, drone_id, profile=None, size=None):
+        """
+        One drone's MJPEG, passed straight through for a plain <img>.
+
+        `profile=detail` is how the dashboard says this is the drone somebody is actually
+        looking at. It reaches the agent unchanged, and the agent renders that one feed bigger,
+        sharper and more often for as long as this connection is open.
+        """
+        try:
+            upstream = cameras.open_stream(drone_id, profile, size)
+        except OSError as e:
+            return self.send_json({"error": f"agent unreachable: {e}"}, HTTPStatus.BAD_GATEWAY)
+
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", upstream.headers.get(
+                "Content-Type", "multipart/x-mixed-replace; boundary=firekeepframe"))
+            self.send_header("Cache-Control", "no-store, no-transform")
+            self.send_header("Content-Encoding", "identity")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            while True:
+                # read1, not read: read(n) blocks until it has all n bytes, so a 4KB frame sat
+                # in the buffer until three more arrived behind it - measured at 452ms of pure
+                # latency on a 480p feed. read1 hands over whatever has turned up.
+                block = upstream.read1(65536)
+                if not block:
+                    return
+                self.wfile.write(block)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass                                    # whichever end went away first
+        finally:
+            upstream.close()
+
     # -- GET ----------------------------------------------------------------
     def do_GET(self):
         path = urlparse(self.path).path
@@ -444,7 +542,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "queued": WORK.qsize(), "busy": busy,
                                    "model": self.server.model,
                                    "dry_run": self.server.key is None,
-                                   "live": feed["live"], "watchers": live.subscriber_count()})
+                                   "live": feed["live"], "watchers": live.subscriber_count(),
+                                   "cameras": cameras.status()})
 
         if path == "/api/jobs":
             with JOBS_LOCK:
@@ -486,6 +585,40 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/world/stream":
             q = parse_qs(urlparse(self.path).query)
             return self.stream(( q.get("dimension") or ["minecraft:overworld"])[0])
+
+        # -- the drone cameras, pulled from the agents on the dashboard's behalf
+        if path == "/api/cameras":
+            return self.send_json(cameras.roster())
+
+        if path == "/api/cameras/feed":
+            q = parse_qs(urlparse(self.path).query)
+            raw = (q.get("ids") or [""])[0]
+            ids = [i for i in raw.split(",") if i]
+            try:
+                fps = float((q.get("fps") or [cameras.DEFAULT_FPS])[0])
+            except ValueError:
+                fps = cameras.DEFAULT_FPS
+            return self.camera_feed(ids, fps)
+
+        if path.startswith("/api/cameras/"):
+            parts = path[len("/api/cameras/"):].rsplit("/", 1)
+            if len(parts) == 2 and parts[0]:
+                q = parse_qs(urlparse(self.path).query)
+                profile = (q.get("profile") or [None])[0]
+                if profile not in cameras.PROFILES:
+                    profile = None
+                size = None
+                try:
+                    if q.get("width") and q.get("height"):
+                        size = (int(q["width"][0]), int(q["height"][0]))
+                except ValueError:
+                    size = None                 # a nonsense size is no size, not an error
+                drone_id = unquote(parts[0])
+                if parts[1] == "frame.jpg":
+                    return self.camera_frame(drone_id, profile, size)
+                if parts[1] == "stream":
+                    return self.camera_stream(drone_id, profile, size)
+            return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
         # -- the real Minecraft world, read straight off the save --------------
         if path == "/api/world" or path == "/api/world/map.png":
@@ -561,6 +694,10 @@ def main():
 
     for _ in range(max(1, args.workers)):
         threading.Thread(target=worker, args=(key,), daemon=True).start()
+
+    # The one conversation with the agents, started up front so the first dashboard to ask
+    # gets a roster rather than an empty one it has to poll again for.
+    cameras.start()
 
     if args.watch or args.watch_dir:
         dirs = ([d for d in args.watch_dir if d.is_dir()]

@@ -13,9 +13,12 @@ export interface DroneCamera {
   yaw: number;
   /** Dashboards currently holding the stream open. */
   viewers: number;
+  /** What this feed is being rendered at right now, not the agent's defaults. */
   width: number;
   height: number;
   fps: number;
+  /** True while the agent is rendering this one at the detail profile for a viewer. */
+  detail?: boolean;
   /** Whether a frame arrived in the last few seconds. */
   live: boolean;
   /** Frames captured since the drone appeared. */
