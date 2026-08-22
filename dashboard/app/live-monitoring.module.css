@@ -74,10 +74,6 @@
 .waitingPulse { width: 22px; height: 22px; margin-bottom: 3px; border: 1px solid var(--accent); border-radius: 50%; animation: waitingPulse 1.6s ease-out infinite; }
 @keyframes waitingPulse { 0% { transform: scale(.55); opacity: .9; } 100% { transform: scale(1.15); opacity: 0; } }
 
-/* A picture that has stopped arriving, said plainly over the last frame of it. */
-.lostBanner { position: absolute; top: 50%; left: 50%; z-index: 2; display: flex; align-items: center; gap: 6px; padding: 5px 10px; transform: translate(-50%, -50%); color: #f0c4bc; background: rgba(10, 12, 11, .82); border: 1px solid rgba(226, 96, 74, .5); border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; letter-spacing: .02em; white-space: nowrap; pointer-events: none; }
-.lostBanner i { width: 5px; height: 5px; border-radius: 50%; background: #e2604a; animation: deployPulse 1.2s ease-in-out infinite; }
-@keyframes deployPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 .notice { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
 
 .overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 36px 64px; background: rgba(5, 7, 6, .9); animation: overlayIn 120ms ease-out both; }

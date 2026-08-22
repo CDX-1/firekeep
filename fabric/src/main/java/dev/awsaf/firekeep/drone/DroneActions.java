@@ -27,7 +27,7 @@ public final class DroneActions {
     }
 
     /** What one water drop achieved, so the report back to n8n can be specific. */
-    public record WaterDrop(int extinguished, int lavaFound, BlockPos impact) {
+    public record WaterDrop(int extinguished, int remainingFires, int lavaFound, BlockPos impact) {
     }
 
     /**
@@ -40,14 +40,15 @@ public final class DroneActions {
     public static WaterDrop dispenseWater(ServerLevel level, Vec3 from, int radius, boolean placeSource) {
         BlockPos impact = groundBelow(level, from);
         if (impact == null) {
-            return new WaterDrop(0, 0, null);
+            return new WaterDrop(0, 0, 0, null);
         }
 
         List<BlockPos> fires = new ArrayList<>();
         int lava = 0;
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        // A drop spreads sideways as it lands, so the sweep is wider than it is tall.
-        for (int dy = -radius; dy <= radius + 2; dy++) {
+        // The impact can be a leaf canopy. Search through the bounded drop column so a
+        // suppression drone reaches flames burning below trees, not just the treetops.
+        for (int dy = -GROUND_SEARCH; dy <= radius + 2; dy++) {
             for (int dx = -radius; dx <= radius; dx++) {
                 for (int dz = -radius; dz <= radius; dz++) {
                     cursor.set(impact.getX() + dx, impact.getY() + dy, impact.getZ() + dz);
@@ -79,7 +80,21 @@ public final class DroneActions {
 
         level.sendParticles(ParticleTypes.SPLASH, impact.getX() + 0.5D, impact.getY() + 1.0D,
                 impact.getZ() + 0.5D, 60, radius * 0.5D, 0.5D, radius * 0.5D, 0.05D);
-        return new WaterDrop(fires.size(), lava, impact);
+        // Confirm the result in the same region after the action. This is cheap (the bounded
+        // action volume was just read) and prevents a dashboard from calling a live fire clear.
+        int remaining = 0;
+        for (int dy = -GROUND_SEARCH; dy <= radius + 2; dy++) {
+            for (int dx = -radius; dx <= radius; dx++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    cursor.set(impact.getX() + dx, impact.getY() + dy, impact.getZ() + dz);
+                    if (level.isLoaded(cursor)
+                            && BlockClass.of(level.getBlockState(cursor), level, cursor) == BlockClass.FIRE) {
+                        remaining++;
+                    }
+                }
+            }
+        }
+        return new WaterDrop(fires.size(), remaining, lava, impact);
     }
 
     /** The first solid block under {@code from}, or null if there is none within reach. */

@@ -27,6 +27,13 @@ export interface Roster {
   revision: number;
 }
 
+/** A one-off roster read for controls outside the continuous camera wall. */
+export async function getRoster(signal?: AbortSignal): Promise<Roster> {
+  const response = await fetch(BASE, { cache: "no-store", signal });
+  if (!response.ok) throw new Error(`/api/cameras -> ${response.status}`);
+  return response.json() as Promise<Roster>;
+}
+
 /** Every camera on the page down one connection: the roster, and the frames it asks for. */
 export const feedUrl = (ids: string[], fps?: number) =>
   `${BASE}/feed?ids=${encodeURIComponent(ids.join(","))}${fps ? `&fps=${fps}` : ""}`;

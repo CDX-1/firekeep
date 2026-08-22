@@ -358,12 +358,7 @@ function Feed({ id, mode, live }: { id: string; mode: FeedMode; live: boolean })
   return (
     <div className={styles.feedBox} ref={box}>
       {blank && <FeedWaiting id={id} live={live} detail={wantStream} />}
-      {/* A picture that has stopped arriving is worse than no picture: it is a stale picture
-          that looks current. The last frame stays - it is still the best information there is
-          about where that drone was - but it is dimmed and labelled. */}
-      {!blank && !live && (
-        <span className={styles.lostBanner}><i />Feed lost &middot; reconnecting</span>
-      )}
+      {/* A stale frame is dimmed, but the wall stays quiet while the browser reconnects. */}
       {/* eslint-disable-next-line @next/next/no-img-element -- frames are painted onto this by hand */}
       <img
         ref={still}

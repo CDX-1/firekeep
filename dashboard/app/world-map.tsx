@@ -997,12 +997,21 @@ function drawEvents(ctx: CanvasRenderingContext2D, events: SimEvent[], view: Vie
     const ring = Math.max(7, event.radius * view.scale);
 
     ctx.globalAlpha = fade * (pending ? 0.45 + 0.35 * Math.sin(time / 260) : 0.7);
-    ctx.strokeStyle = EVENT_INFO[event.kind].color;
+    const suppression = event.status === "contained" || event.status === "cleared";
+    ctx.strokeStyle = suppression ? "#75bee7" : EVENT_INFO[event.kind].color;
     ctx.lineWidth = 1.3;
     ctx.setLineDash(pending ? [3, 4] : []);
     ctx.beginPath();
     ctx.arc(x, y, ring, 0, Math.PI * 2);
     ctx.stroke();
+
+    // A water ripple makes a successful dousing pass legible on the real map.
+    if (suppression) {
+      ctx.globalAlpha = fade * 0.55;
+      ctx.beginPath();
+      ctx.arc(x, y, ring * (0.35 + 0.15 * Math.sin(time / 180)), 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
     ctx.setLineDash([]);
     ctx.globalAlpha = fade;

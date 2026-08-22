@@ -144,6 +144,12 @@ function outcome(event: SimEvent) {
       return "never landed";
     case "failed":
       return event.error ? shorten(event.error) : "failed";
+    case "detected": return "detected";
+    case "validating": return "validating cluster";
+    case "responding": return "crew responding";
+    case "contained": return `${event.affected ?? 0} fire blocks remain`;
+    case "cleared": return "cleared after dousing";
+    case "escalated": return "spreading";
     default:
       break;
   }

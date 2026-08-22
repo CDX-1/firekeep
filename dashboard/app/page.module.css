@@ -1,4 +1,4 @@
-.dashboard { display: flex; flex-direction: column; height: 100dvh; max-width: 1600px; margin: 0 auto; padding: 20px; overflow: hidden; }
+.dashboard { position: relative; display: flex; flex-direction: column; height: 100dvh; max-width: 1600px; margin: 0 auto; padding: 20px; overflow: hidden; }
 .topbar { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(180px, 360px) minmax(150px, 1fr); align-items: center; gap: 20px; height: 42px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .topbar h1 { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--text); font-family: Georgia, "Times New Roman", serif; font-size: 19px; font-weight: 400; letter-spacing: -.035em; }
 .topbar h1::before { width: 6px; height: 6px; content: ""; background: var(--accent); border-radius: 50%; box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -9,20 +9,26 @@
 .search input { width: 100%; padding: 0; color: var(--text); background: transparent; border: 0; outline: 0; font: inherit; font-size: 11px; }
 .search input::placeholder { color: var(--muted); opacity: 1; }
 
-.tabs { display: flex; gap: 2px; margin: 12px 0 14px; }
-.tab { display: flex; align-items: center; gap: 7px; padding: 7px 13px; color: var(--muted); background: transparent; border: 0; border-radius: 5px; font-size: 12px; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
-.tab svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; }
-.tab:hover { color: var(--text); background: rgba(255, 255, 255, .03); }
-.tab[aria-selected="true"] { color: #cae0da; background: var(--accent-soft); }
-.tab:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
+.tools { display: flex; gap: 2px; margin: 12px 0 14px; }
+.tool { display: flex; align-items: center; gap: 7px; padding: 7px 13px; color: var(--muted); background: transparent; border: 0; border-radius: 5px; font-size: 12px; cursor: pointer; transition: color 120ms ease, background-color 120ms ease; }
+.tool svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+.tool:hover { color: var(--text); background: rgba(255, 255, 255, .03); }
+.tool[aria-pressed="true"] { color: #cae0da; background: var(--accent-soft); }
+.tool:focus-visible, .overlayBar button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
 
-.panel { flex: 1; min-height: 0; }
+.workspace { flex: 1; min-height: 0; }
+.overlay { position: absolute; inset: 88px 20px 20px; z-index: 5; display: flex; flex-direction: column; min-height: 0; background: #101210; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .3); }
+.overlayBar { display: flex; align-items: center; justify-content: space-between; height: 46px; padding: 0 14px; color: var(--text); border-bottom: 1px solid var(--line); font-size: 12px; }
+.overlayBar button { padding: 5px 10px; color: var(--muted); background: rgba(255, 255, 255, .05); border: 0; border-radius: 4px; font: inherit; font-size: 11px; cursor: pointer; }
+.overlayBar button:hover { color: var(--text); background: rgba(255, 255, 255, .1); }
+.overlayBody { flex: 1; min-height: 0; padding: 14px; }
 
 @media (max-width: 720px) {
   .dashboard { padding: 12px; }
   .topbar { grid-template-columns: 1fr auto; gap: 12px; height: 76px; }
   .search { grid-row: 2; grid-column: 1 / -1; }
-  .tabs { margin: 10px 0 12px; }
+  .tools { margin: 10px 0 12px; overflow-x: auto; }
+  .overlay { inset: 122px 12px 12px; }
 }
 
-@media (prefers-reduced-motion: reduce) { .tab { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .tool { transition: none; } }

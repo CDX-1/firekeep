@@ -253,9 +253,12 @@ public final class DroneController {
 
         JsonObject data = new JsonObject();
         data.addProperty("extinguished", drop.extinguished());
+        data.addProperty("remaining_fires", drop.remainingFires());
         data.addProperty("lava_nearby", drop.lavaFound());
         data.add("impact", PerceptionSnapshot.vec(Vec3.atCenterOf(drop.impact())));
         DroneEvents.emitAt("water_dispensed", this.droneId, Vec3.atCenterOf(drop.impact()), data.deepCopy());
+        DroneEvents.recordSuppression(this.droneId, level.dimension().identifier().toString(),
+                Vec3.atCenterOf(drop.impact()), drop.extinguished(), drop.remainingFires());
         finish(CommandResult.completed(command, "extinguished " + drop.extinguished() + " fire blocks", data));
     }
 
@@ -548,6 +551,8 @@ public final class DroneController {
     private Vec3 flightPosition(ServerLevel level, Vec3 horizontalTarget) {
         int x = net.minecraft.util.Mth.floor(horizontalTarget.x);
         int z = net.minecraft.util.Mth.floor(horizontalTarget.z);
+        // MOTION_BLOCKING sees leaves as well as terrain. Flight clearance is therefore
+        // canopy-relative, so a route rises over tall trees and descends over open ground.
         int ground = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) - 1;
         double y = Math.max(ground + this.config.minAltitudeAboveGround,
                 Math.min(ground + this.config.targetAltitudeAboveGround,

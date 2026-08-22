@@ -10,6 +10,9 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The mod's outbound notice board: every agent detection and drone outcome goes through here.
@@ -24,11 +27,14 @@ import java.util.Map;
  */
 public final class DroneEvents {
     private static final int HISTORY = 256;
-    /** Fires within the same 8-block cube are the same fire as far as an alert is concerned. */
-    private static final int DEDUP_GRID = 8;
+    /** Nearby fire features belong to one operational incident, not one alert per block. */
+    private static final double CLUSTER_RADIUS = 24.0D;
+    private static final long CLUSTER_TTL_MILLIS = 90_000L;
 
     private static final Deque<DroneEvent> RECENT = new ArrayDeque<>();
     private static final Map<String, Long> REPORTED = new HashMap<>();
+    private static final Map<String, Incident> INCIDENTS = new HashMap<>();
+    private static final AtomicInteger NEXT_INCIDENT = new AtomicInteger();
 
     private static volatile DroneConfig config;
     private static volatile HubClient client;
@@ -42,6 +48,7 @@ public final class DroneEvents {
         synchronized (RECENT) {
             RECENT.clear();
             REPORTED.clear();
+            INCIDENTS.clear();
         }
     }
 
@@ -94,12 +101,12 @@ public final class DroneEvents {
             if (!hazard.type().equals(BlockClass.FIRE.label()) && !hazard.type().equals(BlockClass.LAVA.label())) {
                 continue;
             }
-            String incidentId = incidentId(hazard.type(), snapshot.dimension(), hazard.x(), hazard.y(), hazard.z());
-            if (!claim(incidentId, current.fireEventCooldownSeconds)) {
+            Incident incident = sighting(snapshot, hazard);
+            if (!claim(incident.id, current.fireEventCooldownSeconds)) {
                 continue;
             }
 
-            boolean disaster = hazard.size() >= current.disasterFireCells;
+            boolean disaster = incident.fireBlocks >= current.disasterFireCells;
             JsonObject payload = new JsonObject();
             payload.addProperty("hazard", hazard.type());
             payload.addProperty("size", hazard.size());
@@ -109,15 +116,106 @@ public final class DroneEvents {
             payload.addProperty("terrain", snapshot.terrain());
             payload.addProperty("biome", snapshot.biome());
             payload.addProperty("dimension", snapshot.dimension());
-            payload.addProperty("incident_id", incidentId);
+            payload.addProperty("incident_id", incident.id);
+            payload.addProperty("lifecycle", incident.lifecycle);
+            payload.addProperty("cluster_fire_blocks", incident.fireBlocks);
+            payload.addProperty("cluster_reports", incident.reports);
 
             JsonObject location = new JsonObject();
             location.addProperty("x", hazard.x());
             location.addProperty("y", hazard.y());
             location.addProperty("z", hazard.z());
             payload.add("location", location);
-            emit(disaster ? "disaster_detected" : "fire_detected", snapshot.droneId(), payload);
+            // Only the first report starts a dispatch. Later reports update the same cluster so
+            // a patch of adjacent flame never becomes a fleet of duplicate incidents.
+            emit(incident.reports == 1 ? (disaster ? "disaster_detected" : "fire_detected")
+                    : "incident_update", snapshot.droneId(), payload);
         }
+    }
+
+    /** Records a real water action against the nearest live fire cluster. Server thread only. */
+    public static void recordSuppression(String droneId, String dimension, Vec3 impact,
+                                         int extinguished, int remainingFires) {
+        Incident incident;
+        synchronized (RECENT) {
+            long now = System.currentTimeMillis();
+            expireIncidents(now);
+            incident = nearestIncident(dimension, impact.x, impact.z);
+            if (incident == null) {
+                return;
+            }
+            incident.fireBlocks = Math.max(0, Math.max(remainingFires, incident.fireBlocks - extinguished));
+            incident.lastSeen = now;
+            incident.lifecycle = remainingFires == 0 ? "cleared" : "contained";
+        }
+
+        JsonObject payload = incidentPayload(incident);
+        payload.addProperty("extinguished", extinguished);
+        payload.addProperty("remaining_fires", remainingFires);
+        payload.add("impact", PerceptionSnapshot.vec(impact));
+        emit("suppression_applied", droneId, payload.deepCopy());
+        emit("incident_update", droneId, payload);
+    }
+
+    private static Incident sighting(PerceptionSnapshot snapshot, Feature hazard) {
+        synchronized (RECENT) {
+            long now = System.currentTimeMillis();
+            expireIncidents(now);
+            Incident incident = nearestIncident(snapshot.dimension(), hazard.x(), hazard.z());
+            if (incident == null) {
+                String id = "fire:" + snapshot.dimension() + ":cluster:" + NEXT_INCIDENT.incrementAndGet();
+                incident = new Incident(id, snapshot.dimension(), hazard.x(), hazard.y(), hazard.z(), now);
+                INCIDENTS.put(id, incident);
+            } else {
+                // Keep the centre stable enough to aim responders while still following spread.
+                incident.x = (incident.x * incident.reports + hazard.x()) / (incident.reports + 1.0D);
+                incident.y = hazard.y();
+                incident.z = (incident.z * incident.reports + hazard.z()) / (incident.reports + 1.0D);
+            }
+            incident.reports++;
+            incident.fireBlocks = Math.max(incident.fireBlocks, hazard.size());
+            incident.lastSeen = now;
+            incident.reporters.add(snapshot.droneId());
+            if (incident.reports > 1 && !"cleared".equals(incident.lifecycle)) {
+                incident.lifecycle = "validating";
+            }
+            return incident;
+        }
+    }
+
+    private static Incident nearestIncident(String dimension, double x, double z) {
+        Incident best = null;
+        double bestDistance = CLUSTER_RADIUS * CLUSTER_RADIUS;
+        for (Incident incident : INCIDENTS.values()) {
+            if (!incident.dimension.equals(dimension) || "cleared".equals(incident.lifecycle)) continue;
+            double dx = incident.x - x;
+            double dz = incident.z - z;
+            double distance = dx * dx + dz * dz;
+            if (distance <= bestDistance) {
+                best = incident;
+                bestDistance = distance;
+            }
+        }
+        return best;
+    }
+
+    private static void expireIncidents(long now) {
+        INCIDENTS.entrySet().removeIf(entry -> now - entry.getValue().lastSeen > CLUSTER_TTL_MILLIS);
+    }
+
+    private static JsonObject incidentPayload(Incident incident) {
+        JsonObject payload = new JsonObject();
+        payload.addProperty("incident_id", incident.id);
+        payload.addProperty("dimension", incident.dimension);
+        payload.addProperty("lifecycle", incident.lifecycle);
+        payload.addProperty("cluster_fire_blocks", incident.fireBlocks);
+        payload.addProperty("cluster_reports", incident.reports);
+        JsonObject location = new JsonObject();
+        location.addProperty("x", incident.x);
+        location.addProperty("y", incident.y);
+        location.addProperty("z", incident.z);
+        payload.add("location", location);
+        return payload;
     }
 
     /**
@@ -139,11 +237,25 @@ public final class DroneEvents {
         }
     }
 
-    /** Stable across agents: all sightings in the same dimension/grid cell name one incident. */
-    private static String incidentId(String type, String dimension, int x, int y, int z) {
-        return type + ":" + dimension + ":"
-                + Math.floorDiv(x, DEDUP_GRID) + ":"
-                + Math.floorDiv(y, DEDUP_GRID) + ":"
-                + Math.floorDiv(z, DEDUP_GRID);
+    private static final class Incident {
+        private final String id;
+        private final String dimension;
+        private final Set<String> reporters = new HashSet<>();
+        private double x;
+        private int y;
+        private double z;
+        private int fireBlocks;
+        private int reports;
+        private long lastSeen;
+        private String lifecycle = "detected";
+
+        private Incident(String id, String dimension, int x, int y, int z, long now) {
+            this.id = id;
+            this.dimension = dimension;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.lastSeen = now;
+        }
     }
 }

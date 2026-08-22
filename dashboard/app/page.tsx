@@ -8,25 +8,22 @@ import WorldMap from "./world-map";
 import RiskMap from "./risk-map";
 import { ActivityIcon, FlameIcon, GridIcon, MapIcon, ReportIcon, SearchIcon } from "./icons";
 
-const TABS = [
-  { id: "feeds", label: "Camera feeds", title: "Live Monitoring", Icon: GridIcon },
-  { id: "map", label: "World map", title: "World Map", Icon: MapIcon },
-  { id: "sim", label: "Disaster sim", title: "Disaster Simulation", Icon: FlameIcon },
-  { id: "predictions", label: "Predictions", title: "Fire Risk Predictions", Icon: ActivityIcon },
-  { id: "reports", label: "Incident reports", title: "Incident Reports", Icon: ReportIcon },
+const TOOLS = [
+  { id: "fleet", label: "Fleet", Icon: MapIcon },
+  { id: "sim", label: "Disaster sim", Icon: FlameIcon },
+  { id: "feeds", label: "Camera feeds", Icon: GridIcon },
+  { id: "predictions", label: "Predictions", Icon: ActivityIcon },
+  { id: "reports", label: "Incident reports", Icon: ReportIcon },
 ] as const;
 
-type TabId = (typeof TABS)[number]["id"];
-
-/** The two tabs that are the same map, differing only in what a click on it does. */
-const MAP_TABS: TabId[] = ["map", "sim"];
+type ToolId = (typeof TOOLS)[number]["id"];
+const OVERLAY_TOOLS: ToolId[] = ["feeds", "predictions", "reports"];
 
 export default function Dashboard() {
-  const [tab, setTab] = useState<TabId>("feeds");
+  const [tool, setTool] = useState<ToolId>("fleet");
   const [now, setNow] = useState<Date | null>(null);
   const [request, setRequest] = useState<{ id: string } | null>(null);
   const [report, setReport] = useState<{ id: string } | null>(null);
-  const active = TABS.find((entry) => entry.id === tab) ?? TABS[0];
 
   useEffect(() => {
     setNow(new Date());
@@ -34,24 +31,22 @@ export default function Dashboard() {
     return () => window.clearInterval(timer);
   }, []);
 
-  // A new object every time, so asking for the same drone twice still reaches the feeds.
   const openDroneFeed = useCallback((id: string) => {
     setRequest({ id });
-    setTab("feeds");
+    setTool("feeds");
   }, []);
 
-  // A feed has just had its drone photograph something. The report takes minutes to finish, so
-  // the tab it lands on is opened now rather than when it is done - watching it fill in is the
-  // only feedback that the shutter did anything.
   const openReport = useCallback((id: string) => {
     setReport({ id });
-    setTab("reports");
+    setTool("reports");
   }, []);
+
+  const closeOverlay = useCallback(() => setTool("fleet"), []);
 
   return (
     <main className={styles.dashboard}>
       <header className={styles.topbar}>
-        <h1>{active.title}</h1>
+        <h1>Firekeep</h1>
         <label className={styles.search}>
           <SearchIcon />
           <span className="sr-only">Search footage</span>
@@ -60,85 +55,39 @@ export default function Dashboard() {
         <time dateTime={now?.toISOString()}>{now ? formatDateTime(now) : ""}</time>
       </header>
 
-      <div className={styles.tabs} role="tablist" aria-label="Dashboard views">
-        {TABS.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            className={styles.tab}
-            type="button"
-            role="tab"
-            id={`tab-${id}`}
-            aria-selected={tab === id}
-            aria-controls={MAP_TABS.includes(id) ? "panel-map" : `panel-${id}`}
-            onClick={() => setTab(id)}
-          >
+      <nav className={styles.tools} aria-label="Map tools">
+        {TOOLS.map(({ id, label, Icon }) => (
+          <button key={id} className={styles.tool} type="button" aria-pressed={tool === id} onClick={() => setTool(id)}>
             <Icon />
             <span>{label}</span>
           </button>
         ))}
-      </div>
+      </nav>
 
-      {/* Every panel stays mounted: the map keeps its pan, zoom and drone positions while
-          you are off looking at the feeds. The map and the simulator share one instance of
-          it rather than each holding their own - two canvases and two world-feed connections
-          would cost twice as much and then drift apart, and switching tabs would lose your
-          place. Only what a click means changes. */}
-      <div
-        className={styles.panel}
-        id="panel-feeds"
-        role="tabpanel"
-        aria-labelledby="tab-feeds"
-        hidden={tab !== "feeds"}
-      >
-        <LiveMonitoring request={request} onReport={openReport} />
-      </div>
+      <section className={styles.workspace} aria-label="Live world map">
+        <WorldMap active mode={tool === "sim" ? "simulate" : "drones"} onOpenDroneFeed={openDroneFeed} />
+      </section>
 
-      <div
-        className={styles.panel}
-        id="panel-map"
-        role="tabpanel"
-        aria-labelledby={`tab-${tab === "sim" ? "sim" : "map"}`}
-        hidden={!MAP_TABS.includes(tab)}
-      >
-        <WorldMap
-          active={MAP_TABS.includes(tab)}
-          mode={tab === "sim" ? "simulate" : "drones"}
-          onOpenDroneFeed={openDroneFeed}
-        />
-      </div>
-
-      <div
-        className={styles.panel}
-        id="panel-predictions"
-        role="tabpanel"
-        aria-labelledby="tab-predictions"
-        hidden={tab !== "predictions"}
-      >
-        <RiskMap active={tab === "predictions"} onOpenDroneFeed={openDroneFeed} />
-      </div>
-
-      <div
-        className={styles.panel}
-        id="panel-reports"
-        role="tabpanel"
-        aria-labelledby="tab-reports"
-        hidden={tab !== "reports"}
-      >
-        <IncidentReports active={tab === "reports"} request={report} />
-      </div>
+      {OVERLAY_TOOLS.includes(tool) && (
+        <div className={styles.overlay} role="dialog" aria-modal="true" aria-label={`${tool} tool`}>
+          <div className={styles.overlayBar}>
+            <span>{TOOLS.find((entry) => entry.id === tool)?.label}</span>
+            <button type="button" onClick={closeOverlay}>Close</button>
+          </div>
+          <div className={styles.overlayBody}>
+            {tool === "feeds" && <LiveMonitoring request={request} onReport={openReport} />}
+            {tool === "predictions" && <RiskMap active onOpenDroneFeed={openDroneFeed} />}
+            {tool === "reports" && <IncidentReports active request={report} />}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
 
 function formatDateTime(date: Date) {
   return new Intl.DateTimeFormat("en-CA", {
-    weekday: "short",
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
+    weekday: "short", year: "numeric", month: "short", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
   }).format(date);
 }

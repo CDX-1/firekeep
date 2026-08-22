@@ -12,6 +12,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.util.Mth;
@@ -506,18 +507,21 @@ public final class DroneManager {
                 return;
             }
 
-            DroneEntity drone = FirekeepEntities.spawn(level, position, yaw);
+            // A spawn request is map intent, never an altitude instruction. The motion-blocking
+            // heightmap includes trunks and leaves, so a new drone starts above local canopy.
+            Vec3 spawnAt = spawnPosition(level, position);
+            DroneEntity drone = FirekeepEntities.spawn(level, spawnAt, yaw);
             if (drone == null) {
                 future.completeExceptionally(new IllegalStateException("could not create a drone"));
                 return;
             }
             String id = requestedId == null || requestedId.isBlank() ? nextFreeId(Map.of()) : requestedId;
             drone.setDroneId(id);
-            drone.setHomePosition(position);
+            drone.setHomePosition(spawnAt);
             drone.setMaxSpeed(config.maxSpeedPerTick());
-            CONTROLLERS.put(drone.getUUID(), new DroneController(id, config, position));
+            CONTROLLERS.put(drone.getUUID(), new DroneController(id, config, spawnAt));
             holdChunks(level, drone);
-            DroneEvents.emitAt("drone_spawned", id, position, null);
+            DroneEvents.emitAt("drone_spawned", id, spawnAt, null);
 
             // The entity index will not show it until its chunk is loaded, which is what the
             // ticket above is for; answer the caller once that has actually happened.
@@ -572,6 +576,13 @@ public final class DroneManager {
             return null;
         }
         return minecraftServer.getLevel(ResourceKey.create(Registries.DIMENSION, identifier));
+    }
+
+    private static Vec3 spawnPosition(ServerLevel level, Vec3 requested) {
+        int x = Mth.floor(requested.x);
+        int z = Mth.floor(requested.z);
+        int canopy = level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z) - 1;
+        return new Vec3(requested.x, canopy + config.targetAltitudeAboveGround, requested.z);
     }
 
     /** A short digest of the whole operation, for a coordinating flow's first request. */

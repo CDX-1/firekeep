@@ -14,7 +14,8 @@ const BASE = "/backend";
 export const EVENT_KINDS = ["fire", "lightning", "explosion", "extinguish"] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
-export type EventStatus = "queued" | "sent" | "done" | "failed" | "dropped";
+export type EventStatus = "queued" | "sent" | "done" | "failed" | "dropped"
+  | "detected" | "validating" | "responding" | "contained" | "cleared" | "escalated";
 
 export interface SimEvent {
   id: string;
@@ -34,6 +35,8 @@ export interface SimEvent {
   created: number;
   finished?: number;
   status: EventStatus;
+  /** Present for drone-detected fire clusters; simulator-created events use status alone. */
+  lifecycle?: EventStatus;
   /** blocks lit, bolts landed, or blocks doused, once the mod has reported back */
   affected: number | null;
   error: string | null;
