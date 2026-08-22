@@ -44,3 +44,9 @@ cd dashboard && npm run dev       # http://localhost:3000
 Point the dashboard at a different hub with `MARBLE_SERVER=http://host:port`.
 
 n8n workflows call the hub at `/api/fleet/*` and receive mod events from `/api/mod/events`. Details, keys, and the command table live in the piece READMEs above.
+
+
+Tracks competing in:
+- Best use of n8n
+- Best use of WorldLabs
+- Environmental Track
