@@ -16,6 +16,8 @@ The mod POSTs raw PNG bytes:
     GET  /api/jobs/<id>      one job, including the full world payload
     GET  /api/health         {ok, credits, queued, busy}
     GET  /jobs/<id>/pano.png source.png, preview.jpg, job.json
+    GET  /api/world          top-down map metadata for the live save
+    GET  /api/world/map.png  that map, one pixel per block
     GET  /latest.png         the most recent finished render
     GET  /                   the viewer
 
@@ -38,17 +40,21 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import marble
+import worldmap
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
 JOBS = OUT / "jobs"
 RENDERS = OUT / "renders"        # every finished render, flat and easy to open
 LATEST = OUT / "latest.png"      # ...and the newest one, always at the same path
+WORLD = OUT / "world"            # cached top-down maps, one PNG per dimension
 
 MAX_UPLOAD = 32 * 1024 * 1024          # 32 MB is far above any screenshot
 JOBS_LOCK = threading.Lock()
 JOBS_BY_ID = {}                         # id -> dict
 WORK = queue.Queue()
+WORLD_LOCK = threading.Lock()
+WORLD_BY_DIM = {}               # dimension -> {meta, png, stamp}
 
 # auto-triggered generation should be cheap by default; override with --model
 DEFAULT_MODEL = "marble-1.0-draft"
@@ -248,6 +254,49 @@ def screenshot_dirs():
 
 
 # --------------------------------------------------------------------------
+# world map
+
+def world_stamp(save, dimension):
+    """Cheap fingerprint of the region files, so we only re-render after a save."""
+    try:
+        return sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size)
+                      for f in worldmap.region_dir(save, dimension).glob("r.*.mca"))
+    except worldmap.WorldError:
+        return None
+
+
+def world_map(dimension, save=None, refresh=False):
+    """
+    Renders (or serves from cache) the top-down map of one dimension.
+
+    Rendering a few hundred chunks takes a couple of seconds, so it is cached
+    both in memory and on disk and only redone once Minecraft writes the region
+    files again.
+    """
+    save = save or worldmap.find_save()
+    if save is None:
+        raise worldmap.WorldError("no Minecraft save found - point --save at one")
+
+    with WORLD_LOCK:
+        stamp = world_stamp(save, dimension)
+        cached = WORLD_BY_DIM.get(dimension)
+        if cached and not refresh and cached["stamp"] == stamp:
+            return cached["png"], cached["meta"]
+
+        png, meta = worldmap.render(save, dimension)
+        meta.update(worldmap.level_info(save), save=str(save))
+
+        WORLD.mkdir(parents=True, exist_ok=True)
+        (WORLD / f"{dimension}.png").write_bytes(png)
+        (WORLD / f"{dimension}.json").write_text(json.dumps(meta, indent=2))
+
+        WORLD_BY_DIM[dimension] = {"png": png, "meta": meta, "stamp": stamp}
+        print(f"world map: {dimension} {meta['width']}x{meta['height']} "
+              f"from {meta['chunks']} chunks in {meta['took_seconds']}s")
+        return png, meta
+
+
+# --------------------------------------------------------------------------
 # http
 
 class Handler(BaseHTTPRequestHandler):
@@ -341,6 +390,26 @@ class Handler(BaseHTTPRequestHandler):
                 job["world"] = json.loads(wf.read_text())
             return self.send_json(job)
 
+        # -- the real Minecraft world, read straight off the save --------------
+        if path == "/api/world" or path == "/api/world/map.png":
+            q = parse_qs(urlparse(self.path).query)
+            dimension = (q.get("dimension") or ["overworld"])[0]
+            if dimension not in ("overworld", "the_nether", "the_end"):
+                return self.send_json({"error": f"unknown dimension {dimension}"},
+                                      HTTPStatus.BAD_REQUEST)
+            try:
+                png, meta = world_map(dimension, self.server.save,
+                                      refresh=(q.get("refresh") or [""])[0] in ("1", "true"))
+            except worldmap.WorldError as e:
+                return self.send_json({"error": str(e)}, HTTPStatus.NOT_FOUND)
+            except (OSError, ValueError) as e:
+                return self.send_json({"error": f"could not read the world: {e}"},
+                                      HTTPStatus.INTERNAL_SERVER_ERROR)
+
+            if path == "/api/world/map.png":
+                return self.send_bytes(png, "image/png")
+            return self.send_json(dict(meta, map_url=f"/api/world/map.png?dimension={dimension}"))
+
         if path == "/latest.png":
             if not LATEST.is_file():
                 return self.send_json({"error": "nothing rendered yet"}, HTTPStatus.NOT_FOUND)
@@ -378,6 +447,8 @@ def main():
                     help="also auto-submit new Minecraft screenshots as they appear")
     ap.add_argument("--watch-dir", type=Path, action="append", default=[],
                     metavar="DIR", help="extra folder to watch (repeatable)")
+    ap.add_argument("--save", type=Path, default=None, metavar="DIR",
+                    help="Minecraft save to map (default: newest under fabric/run/saves)")
     ap.add_argument("--dry-run", action="store_true",
                     help="accept captures but never call the API - for wiring up the mod")
     ap.add_argument("--workers", type=int, default=1, help="concurrent generations")
@@ -404,6 +475,7 @@ def main():
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.key, httpd.model, httpd.prompt = key, args.model, args.prompt
+    httpd.save = worldmap.find_save(args.save)
 
     print(f"\nfirekeep capture server  http://{args.host}:{args.port}")
     if key is None:
@@ -413,6 +485,10 @@ def main():
         print(f"  credits {marble.credits(key):.0f}")
     print(f"  POST    http://{args.host}:{args.port}/capture  (raw PNG body)")
     print(f"  renders {RENDERS}  (newest also at {LATEST})")
+    if httpd.save is None:
+        print("  world   no save found - GET /api/world will 404")
+    else:
+        print(f"  world   {httpd.save}  ->  GET /api/world, /api/world/map.png")
     if args.watch or args.watch_dir:
         for d in dirs:
             print(f"  watch   {d}")

@@ -32,6 +32,7 @@ Wiring up the mod? Run with `--dry-run` and hammer it as hard as you like.
 | `--workers 1` | concurrent generations |
 | `--dry-run` | no API calls, no credits |
 | `--prompt "..."` | style guidance |
+| `--save DIR` | Minecraft save to map (default: newest under `fabric/run/saves`) |
 
 ## From inside Minecraft
 
@@ -116,6 +117,30 @@ One job, plus the full Marble `world` payload (mesh, splat and pano URLs).
 ### `GET /latest.png`
 
 The most recent finished render, straight as an image.
+
+### `GET /api/world`
+
+Metadata for a top-down map of the live save, read straight off the region
+files - no mod and no running game needed.
+
+```json
+{ "name": "New World", "dimension": "overworld",
+  "origin_x": -288, "origin_z": -240, "width": 480, "height": 432,
+  "blocks_per_pixel": 1, "chunks": 788, "spawn": { "x": 0, "y": 77, "z": 0 } }
+```
+
+`origin_x`/`origin_z` are the block coordinates of the map's top-left pixel,
+which is what turns a pixel back into a position in the world.
+
+Add `?dimension=the_nether` or `the_end` for the other two, and `?refresh=1` to
+re-render before Minecraft has written the region files again.
+
+### `GET /api/world/map.png`
+
+That map: one pixel per block, painted with vanilla's own map palette and
+north-facing relief shading. Ungenerated chunks are transparent. A few hundred
+chunks take a couple of seconds the first time, then it is cached until the save
+changes on disk.
 
 ## What you get back
 
@@ -203,10 +228,14 @@ Writes into the same `out/jobs/<id>/` layout.
 | `marble.py` | World Labs API client |
 | `server.py` | capture server: queue, workers, JSON API, folder watcher |
 | `main.py` | one-shot CLI |
+| `worldmap.py` | renders a save's region files into a top-down PNG (also a CLI) |
+| `mapcolors.py` | block id -> vanilla map colour |
+| `nbt.py` | minimal NBT reader, decode only |
 | `viewer.html` | rough built-in viewer, served at `/` |
 | `out/jobs/` | one folder per capture |
 | `out/renders/` | every finished render as a plain PNG |
 | `out/latest.png` | the newest one |
+| `out/world/` | cached world maps, one PNG per dimension |
 
 `.env` and `out/` are gitignored, and the server never serves anything outside
 `out/jobs/`.

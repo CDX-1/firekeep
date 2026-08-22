@@ -46,3 +46,22 @@ export interface Health {
   model: string;
   dry_run: boolean;
 }
+
+/** GET /api/world - the top-down map server.py renders from the live save. */
+export interface WorldMeta {
+  dimension: string;
+  /** block coordinates of the map's top-left pixel */
+  origin_x: number;
+  origin_z: number;
+  /** map size in pixels; blocks_per_pixel is 1 today */
+  width: number;
+  height: number;
+  blocks_per_pixel: number;
+  chunks: number;
+  regions: number;
+  took_seconds: number;
+  name: string;
+  spawn: { x: number; y: number; z: number } | null;
+  save: string;
+  map_url: string;
+}

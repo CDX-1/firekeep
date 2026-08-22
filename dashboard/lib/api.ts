@@ -1,4 +1,4 @@
-import type { Health, Job } from "./types";
+import type { Health, Job, WorldMeta } from "./types";
 
 /** Everything goes through the /backend rewrite in next.config.ts. */
 const BASE = "/backend";
@@ -12,6 +12,14 @@ async function json<T>(path: string): Promise<T> {
 export const getHealth = () => json<Health>("/api/health");
 export const getJobs = () => json<Job[]>("/api/jobs");
 export const getJob = (id: string) => json<Job>(`/api/jobs/${id}`);
+
+/** The live Minecraft world, read off the save on disk. */
+export const getWorld = (dimension = "overworld") =>
+  json<WorldMeta>(`/api/world?dimension=${encodeURIComponent(dimension)}`);
+
+/** One pixel per block, transparent wherever the world is not generated yet. */
+export const worldMapUrl = (dimension = "overworld") =>
+  `${BASE}/api/world/map.png?dimension=${encodeURIComponent(dimension)}`;
 
 /** Asset served out of that job's folder, e.g. pano.png */
 export const assetUrl = (jobId: string, file: string) =>
