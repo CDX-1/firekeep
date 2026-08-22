@@ -27,6 +27,10 @@ import time
 import urllib.error
 import urllib.request
 
+# The python.org builds on macOS have no wired-up root certificates, so an https webhook fails
+# on trust before it fails on anything interesting. marble.py owns the one workaround.
+from marble import SSL_CTX
+
 DEFAULT_BASE = "https://smallwoken.app.n8n.cloud/webhook"
 DEFAULT_EVENTS_PATH = "firekeep-events"
 DEFAULT_WILDFIRE_PATH = "minecraft-wildfire"
@@ -137,7 +141,7 @@ def _deliver(body):
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             request = urllib.request.Request(url, method="POST", data=body, headers=headers)
-            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            with urllib.request.urlopen(request, timeout=TIMEOUT, context=SSL_CTX) as response:
                 response.read()
             with _LOCK:
                 if _STATE["online"] is not True:

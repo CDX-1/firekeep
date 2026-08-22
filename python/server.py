@@ -23,6 +23,12 @@ picked. Nothing calls Marble unless a capture, or --backend, asks for it.
 
     POST /api/drones/spawn   put a new drone on the map; the mod gives it an agent
 
+    POST /api/incidents      a drone photographs what it can see; the shots go to n8n, and
+                             what comes back is written up with a map of the affected area
+    GET  /api/incidents      those reports, newest first
+    GET  /api/incidents/<id> one report in full
+    GET  /incidents/<id>/<f> its photographs, its generated view and its map
+
     ANY  /api/fleet/*        the mod's control API, proxied: /api/fleet/drones,
                              /api/fleet/drones/<id>/perception, /api/fleet/dispatch, ...
     POST /api/mod/events     Minecraft reporting something; forwarded on to n8n
@@ -74,6 +80,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
 import cameras
+import incidents
 import live
 import marble
 import minecraft
@@ -715,6 +722,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": f"bad order: {e}"}, HTTPStatus.BAD_REQUEST)
             return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
 
+        # A drone is asked to photograph what it can see, and the pictures become a report:
+        # n8n captions them, the live feed says what is burning around it, and the two are
+        # written up together. Long enough to matter, so this only starts it.
+        if url.path == "/api/incidents":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                return self.send_json({"error": f"body over {MAX_BODY} bytes"},
+                                      HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            try:
+                body = json.loads(self.rfile.read(length)) if length > 0 else {}
+                record = incidents.open_report(
+                    body.get("drone_id") or body.get("id"),
+                    shots=body.get("shots", incidents.DEFAULT_SHOTS),
+                    note=body.get("note", ""),
+                    radius=body.get("radius", incidents.DEFAULT_RADIUS),
+                    dimension=body.get("dimension") or incidents.DIMENSION,
+                    kind=body.get("kind", "patrol"),
+                    source=body.get("source") or self.headers.get("X-Source", "dashboard"),
+                )
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad incident request: {e}"},
+                                      HTTPStatus.BAD_REQUEST)
+            except incidents.IncidentError as e:
+                # No photograph is not a bad request - the drone is there, its camera is not.
+                return self.send_json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return self.send_json({"ok": True, "incident": record}, HTTPStatus.ACCEPTED)
+
         if url.path != "/capture":
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -944,11 +978,28 @@ class Handler(BaseHTTPRequestHandler):
                                    "dry_run": DRY_RUN,
                                    "live": feed["live"], "watchers": live.subscriber_count(),
                                    "cameras": cameras.status(),
+                                   "incidents": incidents.status(),
                                    # the two links this process is the middle of
                                    "minecraft": dict(minecraft.configured(),
                                                      online=minecraft.online()),
                                    "n8n": n8n.status(),
                                    "secured": bool(API_KEY)})
+
+        if path == "/api/incidents":
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                limit = int((q.get("limit") or [incidents.MAX_REPORTS])[0])
+            except ValueError:
+                return self.send_json({"error": "limit must be an integer"},
+                                      HTTPStatus.BAD_REQUEST)
+            return self.send_json({"incidents": incidents.recent(limit),
+                                   "analyst": incidents.status()["analyst"]})
+
+        if path.startswith("/api/incidents/"):
+            record = incidents.get(path.split("/")[3])
+            if not record:
+                return self.send_json({"error": "no such report"}, HTTPStatus.NOT_FOUND)
+            return self.send_json(record)
 
         if path == "/api/jobs":
             with JOBS_LOCK:
@@ -1074,6 +1125,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"error": "viewer.html missing"}, HTTPStatus.NOT_FOUND)
             return self.send_bytes(viewer.read_bytes(), "text/html; charset=utf-8")
 
+        # /incidents/<id>/<file> - the photographs, the map and the generated view
+        if path.startswith("/incidents/"):
+            parts = [p for p in path.split("/")[2:] if p not in ("", ".", "..")]
+            f = incidents.asset(parts[0], parts[1]) if len(parts) == 2 else None
+            if f is None:
+                return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            ctype = {".png": "image/png", ".jpg": "image/jpeg",
+                     ".json": "application/json"}.get(f.suffix, "application/octet-stream")
+            return self.send_bytes(f.read_bytes(), ctype)
+
         # /jobs/<id>/<file> - only ever from inside that job's directory
         if path.startswith("/jobs/"):
             parts = [p for p in path.split("/")[2:] if p not in ("", ".", "..")]
@@ -1150,6 +1211,12 @@ def main():
     JOBS.mkdir(parents=True, exist_ok=True)
     load_jobs()
 
+    # Reports are written on their own thread: one waits minutes on n8n, and an operator
+    # asking for a second must not queue behind it or behind a world capture.
+    incidents.DRY_RUN = DRY_RUN
+    incidents.load()
+    incidents.start()
+
     for _ in range(max(1, args.workers)):
         threading.Thread(target=worker, args=(key,), daemon=True).start()
 
@@ -1189,6 +1256,9 @@ def main():
         print(f"  model   {args.model} (~{marble.MODELS[args.model] + marble.PANO_STEP} credits/capture)")
         print(f"  credits {marble.credits(key):.0f}")
     print(f"  POST    http://{args.host}:{args.port}/capture  (raw PNG body)")
+    narrator = incidents.status()["analyst"]
+    print(f"  reports POST /api/incidents  ->  n8n captions the photo, "
+          f"{narrator['model'] if narrator['available'] else 'nobody'} writes it up")
     print(f"  renders {RENDERS}  (newest also at {LATEST})")
     if httpd.save is None:
         print("  world   no world found - GET /api/world will 404 and the map falls back "

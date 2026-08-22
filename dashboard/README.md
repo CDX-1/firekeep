@@ -31,6 +31,8 @@ way out of this app - the dashboard has no route handlers and talks to nothing e
 | `/backend/capture` | `POST /capture` |
 | `/backend/api/world/stream` | the live world feed, as server-sent events |
 | `/backend/api/cameras/feed` | every drone camera, down one connection |
+| `/backend/api/incidents` | the incident reports, and `POST` to have a drone take one |
+| `/backend/incidents/<id>/map.png` | that report's map of the affected area |
 
 Python is the midpoint: it is the piece that reaches the Minecraft server, the agent
 directory and the World Labs API. Nothing in the browser knows any of their addresses.
@@ -39,7 +41,9 @@ directory and the World Labs API. Nothing in the browser knows any of their addr
 
 | | |
 |---|---|
-| `app/page.tsx` | the whole dashboard — job list, detail pane, upload |
+| `app/page.tsx` | the tab strip, and the handovers between tabs |
+| `app/incident-reports.tsx` | the reports: the cabinet, the plates, and the write-up |
+| `lib/incidents.ts` | the incident endpoints and the record they serve |
 | `lib/api.ts` | typed fetch helpers |
 | `lib/cameras.ts` | the camera endpoints, and which quadrant a drone is over |
 | `lib/camera-feed.ts` | the multiplexed frame stream: one connection, every tile |
@@ -53,7 +57,29 @@ directory and the World Labs API. Nothing in the browser knows any of their addr
 - Polls `/api/jobs` and `/api/health` every 2s. No websockets yet.
 - Images use plain `<img>`, not `next/image` — they come through the proxy and
   don't need the optimizer.
-- The list auto-follows the newest job until you click one.
+- The list auto-follows the newest job until you click one, and the incident cabinet
+  auto-follows the newest report the same way.
+
+## Incident reports
+
+The tab is what a drone found, written up. Taking one is a shutter - on the feed's own HUD, or
+from the picker at the top of the tab - and everything after it is the server's:
+
+```
+ the drone's camera ──▶ 3 photographs ──▶ n8n minecraft-wildfire ──▶ caption + generated view
+                              │                                              │
+ the live world feed ─────────┴──▶ map of the affected area ─────────────────┴──▶ the report
+```
+
+So a report has three plates and a reading of them: the photographs the drone actually took,
+the view n8n generated from them, and a map of the ground they cover with the burning columns,
+the disaster radii and the drone itself drawn on it. Underneath is the narrative, and under that
+the readings it was built from - because a report an operator cannot check against the numbers
+is a report they have to take on faith.
+
+The whole thing takes minutes, nearly all of it waiting on n8n, so a report is on screen from
+the moment its photographs are in: the picture is the part somebody is waiting for. The list
+polls every six seconds, and twice that fast while one is still being written.
 
 ## Drone camera feeds
 

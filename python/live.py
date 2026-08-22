@@ -588,6 +588,67 @@ def _finite(value, name):
     return number
 
 
+def region(dimension, min_x, min_z, width, height):
+    """
+    One box of the live layer, as raw RGBA pixels plus what is inside it.
+
+    The overlay is the whole dimension and an incident is a few hundred blocks of it, so this
+    is the same paint job over a window instead: pixels for whatever the feed has seen,
+    transparent where it has not, and the burning columns and drones that fall inside so a
+    caller can mark them without walking the chunks again.
+
+    Returns None when the feed has never heard of this dimension.
+    """
+    width, height = max(1, int(width)), max(1, int(height))
+    min_x, min_z = int(min_x), int(min_z)
+    max_x, max_z = min_x + width - 1, min_z + height - 1
+
+    with _LOCK:
+        world = _WORLDS.get(dimension)
+        if world is None:
+            return None
+
+        pixels = bytearray(width * height * 4)
+        known = 0
+        for cx in range(min_x >> 4, (max_x >> 4) + 1):
+            for cz in range(min_z >> 4, (max_z >> 4) + 1):
+                chunk = world.chunks.get((cx, cz))
+                if chunk is None:
+                    continue
+                for i in range(COLUMNS):
+                    packed = chunk[i]
+                    if not packed:
+                        continue
+                    x = cx * CHUNK + i % CHUNK - min_x
+                    z = cz * CHUNK + i // CHUNK - min_z
+                    if not (0 <= x < width and 0 <= z < height):
+                        continue
+                    o = (z * width + x) * 4
+                    pixels[o] = packed >> 16 & 0xFF
+                    pixels[o + 1] = packed >> 8 & 0xFF
+                    pixels[o + 2] = packed & 0xFF
+                    pixels[o + 3] = 255
+                    known += 1
+
+        hot = [(x, z) for (x, z) in world.hot if min_x <= x <= max_x and min_z <= z <= max_z]
+        drones = [dict(d) for d in world.drones.values()]
+
+    return {"pixels": pixels, "width": width, "height": height,
+            "origin_x": min_x, "origin_z": min_z,
+            "known": known, "hot": hot, "drones": drones}
+
+
+def hot_near(dimension, x, z, reach):
+    """Every burning column within `reach` blocks of a point, nearest first."""
+    with _LOCK:
+        world = _WORLDS.get(dimension)
+        columns = list(world.hot) if world else []
+    inside = [(hx, hz, ((hx - x) ** 2 + (hz - z) ** 2) ** 0.5) for hx, hz in columns]
+    inside = [c for c in inside if c[2] <= reach]
+    inside.sort(key=lambda c: c[2])
+    return inside
+
+
 def world(dimension="minecraft:overworld"):
     with _LOCK:
         return _WORLDS.get(dimension)

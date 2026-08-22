@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import styles from "./drone-controls.module.css";
+import { ShutterIcon } from "./icons";
+import { openIncident } from "@/lib/incidents";
 import { sendDroneFly, sendDroneHover, sendDroneLook } from "@/lib/live";
 import { DEFAULT_PITCH, rememberPitch } from "@/lib/camera-view";
 import type { DroneCamera } from "@/lib/types";
@@ -40,21 +42,29 @@ const LOOK: Record<string, number> = {
  *
  * <p>Directions are from the drone's point of view because the operator is looking through
  * that camera. Q and E turn in place the way the mouse would in game.
+ *
+ * <p>The shutter is here rather than beside the picture for the same reason the stick is: the
+ * moment worth photographing is one you are looking at, and a control you have to look away to
+ * find is one you use after the smoke has moved.
  */
 export default function DroneControls({
   drone,
   controlling,
   onToggleControl,
+  onReport,
   compact = false,
 }: {
   drone: DroneCamera;
   controlling: boolean;
   onToggleControl: (next: boolean) => void;
+  /** Called with the new report's id once the drone has actually taken the photographs. */
+  onReport?: (incidentId: string) => void;
   /** A grid tile: room for the bar, but not for a pad on top of a thumbnail. */
   compact?: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [flying, setFlying] = useState(false);
+  const [shooting, setShooting] = useState(false);
   const [held, setHeld] = useState<string[]>([]);
   const [pitch, setPitch] = useState(DEFAULT_PITCH);
 
@@ -119,6 +129,26 @@ export default function DroneControls({
     pressed.current.clear();
     setHeld([]);
   }, []);
+
+  /**
+   * Photographs what this drone can see and hands the report over.
+   *
+   * <p>Takes a couple of seconds - the drone shoots several frames a second apart - and then
+   * resolves long before the report is finished. What it hands back is the id, so whoever is
+   * listening can open the report and watch the rest of it arrive.
+   */
+  const photograph = useCallback(async () => {
+    setShooting(true);
+    setError(null);
+    try {
+      const { incident } = await openIncident({ droneId: id.current });
+      onReport?.(incident.id);
+    } catch (cause) {
+      report(cause);
+    } finally {
+      setShooting(false);
+    }
+  }, [onReport, report]);
 
   const setCameraPitch = useCallback((next: number) => {
     setPitch(next);
@@ -246,6 +276,16 @@ export default function DroneControls({
           </label>
           <button
             type="button"
+            className={styles.shutter}
+            disabled={shooting}
+            onClick={() => void photograph()}
+            title="Photograph this view and write it up as an incident report"
+          >
+            <ShutterIcon />
+            <span>{shooting ? "Photographing" : "Report"}</span>
+          </button>
+          <button
+            type="button"
             className={styles.take}
             data-on={controlling}
             aria-pressed={controlling}
@@ -255,11 +295,13 @@ export default function DroneControls({
         <p className={styles.status} data-error={Boolean(error)}>
           {error
             ? `Order failed: ${error}`
-            : !controlling
-              ? "Take control to fly this drone from the keyboard"
-              : flying
-                ? "Flying — W A S D · Q / E turn · Space / Shift · H hold"
-                : "W A S D fly · Q / E turn · Space climb · Shift descend · H hold"}
+            : shooting
+              ? "Photographing - the report opens when the shots are in"
+              : !controlling
+                ? "Take control to fly this drone from the keyboard"
+                : flying
+                  ? "Flying — W A S D · Q / E turn · Space / Shift · H hold"
+                  : "W A S D fly · Q / E turn · Space climb · Shift descend · H hold"}
         </p>
       </div>
     </div>

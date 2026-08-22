@@ -28,9 +28,11 @@ type FeedMode = "off" | "still" | "stream";
 type LiveMonitoringProps = {
   /** A drone the map has handed over, as a fresh object per request so repeats still land. */
   request: { id: string } | null;
+  /** Called when a feed's shutter has opened a report, so the dashboard can go and show it. */
+  onReport?: (incidentId: string) => void;
 };
 
-export default function LiveMonitoring({ request }: LiveMonitoringProps) {
+export default function LiveMonitoring({ request, onReport }: LiveMonitoringProps) {
   const [activeFilter, setActiveFilter] = useState<Filter>("All");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // Held by id, not by object: the roster is replaced wholesale every time it changes, so
@@ -216,6 +218,7 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
                       drone={drone}
                       controlling={controllingId === drone.id}
                       onToggleControl={toggleControl(drone.id)}
+                      onReport={onReport}
                     />
                   </>
                 )}
@@ -254,6 +257,7 @@ export default function LiveMonitoring({ request }: LiveMonitoringProps) {
                 drone={selectedDrone}
                 controlling={controllingId === selectedDrone.id}
                 onToggleControl={toggleControl(selectedDrone.id)}
+                onReport={onReport}
               />
             </div>
             {visibleDrones.length > 1 && !controllingId && <button className={styles.viewerArrow} type="button" aria-label="Next drone feed" onClick={() => moveViewer(1)}>

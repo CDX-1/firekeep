@@ -13,7 +13,9 @@ API key on this side, no prompt to pass, and nothing billed to the key in
       -> {status, succeeded, failed, error, world_url, assets}
 
 Everything raises WildfireError, so a long-running server survives a bad
-request the same way it does with Marble.
+request the same way it does with Marble. Not being able to reach the workflow
+is the subclass WildfireUnavailable, which `wait` treats as a poll to try again
+rather than as a generation that failed.
 """
 
 import json
@@ -48,6 +50,11 @@ class WildfireError(RuntimeError):
     pass
 
 
+class WildfireUnavailable(WildfireError):
+    """The workflow could not be reached. Says nothing about the generation itself."""
+    pass
+
+
 def multipart(field, filename, data, content_type=None):
     """Encode one file as multipart/form-data. Returns (body, content_type)."""
     boundary = uuid.uuid4().hex
@@ -71,7 +78,11 @@ def request(method, url, *, body=None, content_type=None, timeout=60):
     except urllib.error.HTTPError as e:
         raise WildfireError(f"{method} {url} -> {e.code}: {e.read().decode(errors='replace')[:300]}")
     except urllib.error.URLError as e:
-        raise WildfireError(f"cannot reach {url}: {e.reason}")
+        raise WildfireUnavailable(f"cannot reach {url}: {e.reason}")
+    except (TimeoutError, OSError) as e:
+        # A read timeout does not come through URLError, and one poll timing out is not the
+        # same as a generation failing - see wait().
+        raise WildfireUnavailable(f"cannot reach {url}: {e}")
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -121,10 +132,24 @@ def state(payload):
 
 
 def wait(status_url, on_progress=None, timeout=1800, interval=15):
-    """Poll to completion and return the finished payload (world_url + assets)."""
+    """
+    Poll to completion and return the finished payload (world_url + assets).
+
+    A poll that cannot be answered is not a failure. The generation is running on somebody
+    else's machine and will keep running whether or not this one status request got through, so
+    an unreachable workflow costs a turn of the loop rather than the world - only a workflow
+    that says it failed, or a deadline, ends this.
+    """
     deadline = monotonic() + timeout
+    unreachable = None
     while monotonic() < deadline:
-        payload = status(status_url)
+        try:
+            payload = status(status_url)
+        except WildfireUnavailable as e:
+            unreachable = e
+            sleep(interval)
+            continue
+        unreachable = None
         now = state(payload)
 
         if payload.get("succeeded") or now in DONE:
@@ -135,6 +160,9 @@ def wait(status_url, on_progress=None, timeout=1800, interval=15):
         if on_progress:
             on_progress(payload.get("progress_percent") or PROGRESS.get(now))
         sleep(interval)
+
+    if unreachable is not None:
+        raise WildfireUnavailable(f"gave up waiting for the world: {unreachable}")
     raise WildfireError("timed out waiting for the world")
 
 

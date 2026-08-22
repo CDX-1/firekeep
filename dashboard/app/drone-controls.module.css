@@ -48,6 +48,10 @@
 .settings { grid-column: 1 / -1; grid-row: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .topRow { order: 2; display: flex; align-items: center; gap: 8px; flex: 0 0 auto; margin-left: auto; }
 .take { height: 26px; padding: 0 12px; font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
+/* The shutter works without taking control - photographing is watching, not flying. */
+.shutter { grid-auto-flow: column; gap: 6px; height: 26px; padding: 0 10px; font-size: 10px; letter-spacing: .02em; white-space: nowrap; }
+.shutter svg { width: 13px; height: 13px; }
+.shutter:disabled { opacity: .55; cursor: progress; }
 .take[data-on="true"] { color: #eaf5f1; background: rgba(58, 96, 86, .9); outline-color: var(--accent); }
 .pitch { display: grid; grid-template-columns: auto 74px 28px; align-items: center; gap: 6px; height: 26px; padding: 0 8px; color: #c9d2cd; background: rgba(12, 15, 13, .58); border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; white-space: nowrap; }
 .pitch input { width: 74px; margin: 0; accent-color: #8fb8ae; cursor: pointer; }
@@ -63,6 +67,9 @@
 .controls[data-compact="true"] .pad, .controls[data-compact="true"] .altitude { display: none; }
 .controls[data-compact="true"] .status { font-size: 9px; }
 .controls[data-compact="true"] .pitch { display: none; }
+/* A thumbnail keeps the shutter but loses its label - the icon is the whole control. */
+.controls[data-compact="true"] .shutter { padding: 0 8px; }
+.controls[data-compact="true"] .shutter span { display: none; }
 
 @media (max-width: 720px) {
   .controls { padding: 24px 8px 26px; gap: 7px; }
@@ -70,6 +77,7 @@
   .altitude button { height: 28px; }
   .altitude button span { display: none; }
   .status { display: none; }
+  .shutter span { display: none; }
   .pitch span { display: none; }
   .pitch { grid-template-columns: 74px 28px; }
 }

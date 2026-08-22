@@ -2,18 +2,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 import styles from "./page.module.css";
-import GeneratedWorlds from "./generated-worlds";
+import IncidentReports from "./incident-reports";
 import LiveMonitoring from "./live-monitoring";
 import WorldMap from "./world-map";
 import RiskMap from "./risk-map";
-import { ActivityIcon, FlameIcon, GridIcon, MapIcon, SearchIcon, WorldsIcon } from "./icons";
+import { ActivityIcon, FlameIcon, GridIcon, MapIcon, ReportIcon, SearchIcon } from "./icons";
 
 const TABS = [
   { id: "feeds", label: "Camera feeds", title: "Live Monitoring", Icon: GridIcon },
   { id: "map", label: "World map", title: "World Map", Icon: MapIcon },
   { id: "sim", label: "Disaster sim", title: "Disaster Simulation", Icon: FlameIcon },
   { id: "predictions", label: "Predictions", title: "Fire Risk Predictions", Icon: ActivityIcon },
-  { id: "worlds", label: "Generated worlds", title: "Generated Worlds", Icon: WorldsIcon },
+  { id: "reports", label: "Incident reports", title: "Incident Reports", Icon: ReportIcon },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -25,6 +25,7 @@ export default function Dashboard() {
   const [tab, setTab] = useState<TabId>("feeds");
   const [now, setNow] = useState<Date | null>(null);
   const [request, setRequest] = useState<{ id: string } | null>(null);
+  const [report, setReport] = useState<{ id: string } | null>(null);
   const active = TABS.find((entry) => entry.id === tab) ?? TABS[0];
 
   useEffect(() => {
@@ -37,6 +38,14 @@ export default function Dashboard() {
   const openDroneFeed = useCallback((id: string) => {
     setRequest({ id });
     setTab("feeds");
+  }, []);
+
+  // A feed has just had its drone photograph something. The report takes minutes to finish, so
+  // the tab it lands on is opened now rather than when it is done - watching it fill in is the
+  // only feedback that the shutter did anything.
+  const openReport = useCallback((id: string) => {
+    setReport({ id });
+    setTab("reports");
   }, []);
 
   return (
@@ -81,7 +90,7 @@ export default function Dashboard() {
         aria-labelledby="tab-feeds"
         hidden={tab !== "feeds"}
       >
-        <LiveMonitoring request={request} />
+        <LiveMonitoring request={request} onReport={openReport} />
       </div>
 
       <div
@@ -110,12 +119,12 @@ export default function Dashboard() {
 
       <div
         className={styles.panel}
-        id="panel-worlds"
+        id="panel-reports"
         role="tabpanel"
-        aria-labelledby="tab-worlds"
-        hidden={tab !== "worlds"}
+        aria-labelledby="tab-reports"
+        hidden={tab !== "reports"}
       >
-        <GeneratedWorlds active={tab === "worlds"} />
+        <IncidentReports active={tab === "reports"} request={report} />
       </div>
     </main>
   );

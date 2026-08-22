@@ -36,8 +36,13 @@ export function GridIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1" /><rect x="13.5" y="3.5" width="7" height="7" rx="1" /><rect x="3.5" y="13.5" width="7" height="7" rx="1" /><rect x="13.5" y="13.5" width="7" height="7" rx="1" /></svg>;
 }
 
-export function WorldsIcon() {
-  return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M3.5 12h17M12 3.5c2.2 2.4 3.3 5.3 3.3 8.5S14.2 18.1 12 20.5c-2.2-2.4-3.3-5.3-3.3-8.5S9.8 5.9 12 3.5Z" /></svg>;
+export function ReportIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5h7.8L18.5 7.7v12.8H6.5Z" /><path d="M14 3.6v4.3h4.3" /><path d="M9.2 12h6M9.2 15.4h6M9.2 18h3.4" /></svg>;
+}
+
+/** The shutter, for asking a drone to photograph what it can see. */
+export function ShutterIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="3.6" /><path d="M12 3.5v5M20.5 12h-5M12 20.5v-5M3.5 12h5" /></svg>;
 }
 
 export function UploadIcon() {

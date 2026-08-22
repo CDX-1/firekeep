@@ -78,6 +78,9 @@ Which means, concretely:
 | `FIREKEEP_N8N_WILDFIRE` | the world-generation webhook (default `minecraft-wildfire`) |
 | `FIREKEEP_AGENTS` | the Fabric server's agent directory (default `http://127.0.0.1:8087`) |
 | `FIREKEEP_CAMERAS` | the one agent to use when there is no directory (default `http://127.0.0.1:8088`) |
+| `SPURIC_API_KEY` | the analyst that writes incident reports; `QWEN_API_KEY` is accepted as the older name. Unset leaves reports built from the numbers alone |
+| `SPURIC_BASE_URL` | OpenAI-compatible base for it (default `https://ai.spuric.com/v1`) |
+| `SPURIC_MODEL` | which model writes them (default `spur-qwen3-235b`) |
 
 `FIREKEEP_API_KEY` is only asked for when the caller is not local. A request is local when the
 socket is loopback *and* nothing forwarded it: `cloudflared` runs on this machine too, so the
@@ -257,6 +260,76 @@ camera-feed event overlay; it does not move the drone or change the Minecraft wo
 ```
 
 `GET /api/drone-events?drone_id=alpha` returns that overlay's recent event history.
+
+### `POST /api/incidents`
+
+Has one drone photograph what it can see, and writes the result up as an incident report. This
+is the pipeline the dashboard's **Incident reports** tab shows:
+
+```
+ drone camera ──▶ photographs ──▶ n8n minecraft-wildfire ──▶ caption + generated view
+                       │                                              │
+ live feed ────────────┴──▶ map of the affected area ─────────────────┴──▶ the analyst ──▶ report
+```
+
+```json
+{ "drone_id": "alpha", "shots": 3, "note": "smoke reported to the north-east", "radius": 96 }
+```
+
+Only `drone_id` is required. `shots` (1-8) is how many frames the drone takes, a second apart;
+`radius` (32-512 blocks) is how far around it counts as the incident. Answers `202` with the
+record as soon as the photographs are in hand.
+
+The rest arrives in three settlings, because the parts take nothing like the same time:
+
+| | |
+|---|---|
+| ~1s | the photographs and `map.png` — both made from readings this process already holds |
+| ~1min | `status: done`, with the write-up. n8n runs a vision model over the photograph before it acknowledges it, and that caption is what the analyst is given |
+| ~5min | `generated` — the world n8n built from the shot, attached to a report that has been readable the whole time |
+
+That last wait is why the report does not sit behind it: nobody reading about a fire should be
+kept waiting on a picture of one. `generating` is true while it is still coming, and collecting
+happens on its own threads, so a second report is never queued behind the first one's image.
+
+Nothing in that chain can fail the report. n8n unreachable costs the generated image and the
+caption; no `SPURIC_API_KEY` costs the prose and leaves a write-up built from the numbers, which
+is what `report.source` distinguishes. Without a caption nothing describes the photograph — the
+analyst is told to say so rather than to guess at one it has not seen:
+
+```json
+{
+  "id": "inc-9ee0f835c2",
+  "status": "done",
+  "drone_id": "alpha",
+  "photos": ["photo-1.jpg", "photo-2.jpg", "photo-3.jpg"],
+  "generated": "pano.png",
+  "generated_prompt": "A wide grassland under heavy smoke ...",
+  "map": "map.png",
+  "map_meta": { "origin_x": -96, "origin_z": -96, "width": 193, "height": 193, "scale": 3 },
+  "scene": { "position": { "x": 0, "y": 74, "z": 0, "yaw": 315 }, "fires_nearby": 1398,
+             "nearest_fire": 35.4, "events": [], "observations": [] },
+  "report": {
+    "source": "ai",
+    "severity": "critical",
+    "headline": "Fire front 35 blocks north-east of alpha",
+    "summary": "...", "spread": "...", "impact": "...", "actions": ["..."]
+  }
+}
+```
+
+A finished report is also pushed to n8n as an `incident_report` event, so a workflow that asked
+for one does not have to poll for it.
+
+### `GET /api/incidents`
+
+Every report, newest first, and whether the analyst has a key. The burning columns each report
+was drawn from are left out here - there are thousands of them and the map is what they were
+for; `GET /api/incidents/<id>` has the whole record.
+
+### `GET /incidents/<id>/<file>`
+
+`photo-1.jpg`, `map.png`, the generated `pano.png`, `world.json`, `incident.json`.
 
 ### `GET /jobs/<id>/<file>`
 
@@ -561,6 +634,8 @@ Writes into the same `out/jobs/<id>/` layout.
 | `worldmap.py` | renders a save's region files into a top-down PNG (also a CLI) |
 | `live.py` | the live world layer: the mod's feed, and the stream out to dashboards |
 | `cameras.py` | the drone cameras: the agent directory, one pull per drone, one stream out |
+| `incidents.py` | incident reports: the photographs, the map of the affected area, the pipeline |
+| `analyst.py` | the one place a language model is asked for prose |
 | `mapcolors.py` | block id -> vanilla map colour |
 | `nbt.py` | minimal NBT reader, decode only |
 | `viewer.html` | rough built-in viewer, served at `/` |
@@ -568,6 +643,7 @@ Writes into the same `out/jobs/<id>/` layout.
 | `out/renders/` | every finished render as a plain PNG |
 | `out/latest.png` | the newest one |
 | `out/world/` | cached world maps, one PNG per dimension |
+| `out/incidents/` | one folder per report: its photographs, its map, its write-up |
 
 `.env` and `out/` are gitignored, and the server never serves anything outside
-`out/jobs/`.
+`out/jobs/` and `out/incidents/`.
