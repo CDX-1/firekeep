@@ -993,13 +993,16 @@ function drawEvents(ctx: CanvasRenderingContext2D, events: SimEvent[], view: Vie
     const fade = pending ? 1 : 1 - age / EVENT_FADE_SECONDS;
     const x = toScreenX(event.x);
     const y = toScreenY(event.z);
-    // a bare marker still reads at any zoom, where a 4-block circle would vanish
-    const ring = Math.max(7, event.radius * view.scale);
+    const detectedFire = event.lifecycle !== undefined;
+    // A detection reports a cluster centre, not its geometric footprint. Exact burning columns
+    // come from the live layer beneath it, so this is deliberately a reticle rather than a
+    // made-up area circle based on the number of detected blocks.
+    const ring = Math.max(detectedFire ? 12 : 7, event.radius * view.scale);
 
     ctx.globalAlpha = fade * (pending ? 0.45 + 0.35 * Math.sin(time / 260) : 0.7);
     const suppression = event.status === "contained" || event.status === "cleared";
     ctx.strokeStyle = suppression ? "#75bee7" : EVENT_INFO[event.kind].color;
-    ctx.lineWidth = 1.3;
+    ctx.lineWidth = detectedFire ? 1.8 : 1.3;
     ctx.setLineDash(pending ? [3, 4] : []);
     ctx.beginPath();
     ctx.arc(x, y, ring, 0, Math.PI * 2);
@@ -1021,6 +1024,11 @@ function drawEvents(ctx: CanvasRenderingContext2D, events: SimEvent[], view: Vie
     ctx.moveTo(x, y - 3.5);
     ctx.lineTo(x, y + 3.5);
     ctx.stroke();
+
+    if (detectedFire && !suppression) {
+      ctx.globalAlpha = fade * .92;
+      label(ctx, `Fire cluster · ${event.affected ?? event.intensity} blocks`, x, y + ring + 7);
+    }
   }
   ctx.restore();
 }
@@ -1156,6 +1164,12 @@ function drawFire(ctx: CanvasRenderingContext2D, layer: LiveLayer, view: View,
   // a tighter, hotter core inside the halo
   ctx.globalAlpha = pulse;
   ctx.filter = `blur(${(blur / 3).toFixed(1)}px)`;
+  ctx.drawImage(layer.heat, x, y, w, h);
+
+  // Keep an unblurred core on the same pixels the mod marked as burning. At a close zoom this
+  // is the exact fire location; the halo remains useful while viewing the whole world.
+  ctx.globalAlpha = Math.min(1, pulse + .18);
+  ctx.filter = "none";
   ctx.drawImage(layer.heat, x, y, w, h);
   ctx.restore();
 }

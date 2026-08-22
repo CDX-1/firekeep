@@ -483,15 +483,18 @@ def record_mod_event(payload):
             incident_id = str(record.get("incident_id") or record["id"])
             if incident_id not in _EVENTS_BY_ID and location.get("x") is not None and location.get("z") is not None:
                 lifecycle = str(record.get("lifecycle") or "detected")
+                fire_blocks = int(record.get("cluster_fire_blocks") or record.get("size") or 1)
                 detected = {
                     "id": incident_id, "kind": "fire",
                     "dimension": str(record.get("dimension") or "minecraft:overworld"),
                     "x": _finite(location["x"], "location.x"),
                     "y": location.get("y"), "z": _finite(location["z"], "location.z"),
-                    "radius": int(record.get("size") or 1), "intensity": int(record.get("size") or 1),
+                    # A fire-block count is not a geographic radius. The live map draws the
+                    # exact burning columns; this incident is its reported cluster centre.
+                    "radius": int(record.get("radius") or 0), "intensity": fire_blocks,
                     "label": "Fire cluster", "source": record.get("drone_id") or "drone",
                     "created": record["at"] / 1000.0, "status": lifecycle, "lifecycle": lifecycle,
-                    "affected": int(record.get("size") or 1), "error": None,
+                    "affected": fire_blocks, "error": None,
                 }
                 _EVENTS.append(detected)
                 _EVENTS_BY_ID[incident_id] = detected

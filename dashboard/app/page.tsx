@@ -6,7 +6,7 @@ import IncidentReports from "./incident-reports";
 import LiveMonitoring from "./live-monitoring";
 import WorldMap from "./world-map";
 import RiskMap from "./risk-map";
-import { ActivityIcon, FlameIcon, GridIcon, MapIcon, ReportIcon, SearchIcon } from "./icons";
+import { ActivityIcon, FlameIcon, GridIcon, MapIcon, ReportIcon } from "./icons";
 
 const TOOLS = [
   { id: "feeds", label: "Camera feeds", Icon: GridIcon },
@@ -17,7 +17,6 @@ const TOOLS = [
 ] as const;
 
 type ToolId = (typeof TOOLS)[number]["id"];
-const OVERLAY_TOOLS: ToolId[] = ["predictions", "reports"];
 
 export default function Dashboard() {
   const [tool, setTool] = useState<ToolId>("feeds");
@@ -41,18 +40,12 @@ export default function Dashboard() {
     setTool("reports");
   }, []);
 
-  const closeOverlay = useCallback(() => setTool("fleet"), []);
   const activeLabel = TOOLS.find((entry) => entry.id === tool)?.label ?? "Firekeep";
 
   return (
     <main className={styles.dashboard}>
       <header className={styles.topbar}>
         <h1>{activeLabel}</h1>
-        <label className={styles.search}>
-          <SearchIcon />
-          <span className="sr-only">Search footage</span>
-          <input type="search" placeholder="Search footage" />
-        </label>
         <time dateTime={now?.toISOString()}>{now ? formatDateTime(now) : ""}</time>
       </header>
 
@@ -69,23 +62,18 @@ export default function Dashboard() {
         <section className={styles.workspace} aria-label="Camera feeds">
           <LiveMonitoring request={request} onReport={openReport} />
         </section>
+      ) : tool === "predictions" ? (
+        <section className={styles.workspace} aria-label="Fire risk predictions">
+          <RiskMap active onOpenDroneFeed={openDroneFeed} />
+        </section>
+      ) : tool === "reports" ? (
+        <section className={styles.workspace} aria-label="Incident reports">
+          <IncidentReports active request={report} />
+        </section>
       ) : (
         <section className={styles.workspace} aria-label="Live world map">
           <WorldMap active mode={tool === "sim" ? "simulate" : "drones"} onOpenDroneFeed={openDroneFeed} />
         </section>
-      )}
-
-      {OVERLAY_TOOLS.includes(tool) && (
-        <div className={styles.overlay} role="dialog" aria-modal="true" aria-label={`${tool} tool`}>
-          <div className={styles.overlayBar}>
-            <span>{TOOLS.find((entry) => entry.id === tool)?.label}</span>
-            <button type="button" onClick={closeOverlay}>Close</button>
-          </div>
-          <div className={styles.overlayBody}>
-            {tool === "predictions" && <RiskMap active onOpenDroneFeed={openDroneFeed} />}
-            {tool === "reports" && <IncidentReports active request={report} />}
-          </div>
-        </div>
       )}
     </main>
   );
