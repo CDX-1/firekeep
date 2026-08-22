@@ -1,0 +1,255 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>firekeep — capture server</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22><text y=%2214%22 font-size=%2214%22>🌍</text></svg>">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b0d10; color: #e6e8eb; overflow: hidden;
+         font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  canvas { display: block; }
+
+  #side { position: fixed; top: 0; left: 0; bottom: 0; width: 320px; z-index: 5;
+          display: flex; flex-direction: column; background: rgba(13,16,20,.92);
+          backdrop-filter: blur(14px); border-right: 1px solid rgba(255,255,255,.09); }
+  header { padding: 14px 16px 12px; border-bottom: 1px solid rgba(255,255,255,.09); }
+  header h1 { margin: 0; font-size: 14px; letter-spacing: -.01em; }
+  #health { margin: 3px 0 0; font-size: 11px; color: #8b93a1; }
+  #health b { color: #7dd3fc; font-weight: 500; }
+  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+         background: #4ade80; margin-right: 5px; vertical-align: middle; }
+  .dot.off { background: #f87171; }
+
+  #list { flex: 1; overflow-y: auto; padding: 8px; }
+  .job { display: grid; grid-template-columns: 56px 1fr; gap: 10px; padding: 8px;
+         border-radius: 9px; cursor: pointer; border: 1px solid transparent; margin-bottom: 2px; }
+  .job:hover { background: rgba(255,255,255,.045); }
+  .job.on { background: rgba(125,211,252,.11); border-color: rgba(125,211,252,.35); }
+  .job img { width: 56px; height: 42px; object-fit: cover; border-radius: 5px;
+             background: #1a1f27; border: 1px solid rgba(255,255,255,.09); }
+  .job .ph { width: 56px; height: 42px; border-radius: 5px; background: #1a1f27;
+             display: grid; place-content: center; font-size: 16px; }
+  .job b { display: block; font-size: 12px; font-weight: 500; overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+  .job small { font-size: 11px; color: #8b93a1; }
+  .tag { display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 4px;
+         text-transform: uppercase; letter-spacing: .05em; vertical-align: 1px; }
+  .queued { background: #3f3f46; color: #d4d4d8; }
+  .generating { background: #1e3a5f; color: #7dd3fc; }
+  .done { background: #14532d; color: #86efac; }
+  .failed { background: #4c1d24; color: #fca5a5; }
+
+  footer { padding: 12px 16px; border-top: 1px solid rgba(255,255,255,.09); font-size: 11px;
+           color: #8b93a1; }
+  footer code { color: #b6bdc8; font: 11px ui-monospace, monospace; }
+
+  #stage { position: fixed; inset: 0 0 0 320px; }
+  #modes { position: fixed; top: 16px; right: 16px; z-index: 6; display: flex; gap: 4px;
+           background: rgba(13,16,20,.9); padding: 4px; border-radius: 9px;
+           border: 1px solid rgba(255,255,255,.1); }
+  #modes button { border: 0; background: transparent; color: #8b93a1; font: inherit;
+                  font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer; }
+  #modes button.on { background: rgba(255,255,255,.1); color: #e6e8eb; }
+  #modes button:disabled { opacity: .35; cursor: not-allowed; }
+
+  #meta { position: fixed; bottom: 16px; right: 16px; z-index: 6; width: 260px; padding: 12px 14px;
+          border-radius: 10px; background: rgba(13,16,20,.9); font-size: 11px; color: #8b93a1;
+          border: 1px solid rgba(255,255,255,.1); }
+  #meta a { color: #7dd3fc; }
+  #meta p { margin: 0 0 6px; }
+
+  #note { position: fixed; inset: 0 0 0 320px; display: grid; place-content: center;
+          text-align: center; gap: 10px; z-index: 4; background: #0b0d10; }
+  #note.hide { display: none; }
+  #note small { color: #8b93a1; }
+</style>
+
+<aside id="side">
+  <header>
+    <h1>firekeep capture server</h1>
+    <p id="health"><span class="dot off"></span>connecting…</p>
+  </header>
+  <div id="list"></div>
+  <footer>waiting for Minecraft — <code>POST /capture</code></footer>
+</aside>
+
+<div id="modes">
+  <button id="mPano" class="on">360 photo</button>
+  <button id="mSplat">3D splats</button>
+</div>
+
+<div id="note"><div id="noteMsg">no worlds yet</div><small id="noteSub">take a screenshot in Minecraft</small></div>
+<div id="meta" hidden></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+    "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js"
+} }
+</script>
+
+<script type="module">
+import * as THREE from "three";
+
+const $ = id => document.getElementById(id);
+const api = p => fetch(p).then(r => r.json()).catch(() => null);
+
+let jobs = [], current = null, mode = "pano", spark = null;
+
+// --- three.js scene, shared by both modes --------------------------------
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, 1, 0.05, 500);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+Object.assign(renderer.domElement.style,
+  { position: "fixed", inset: "0 0 0 320px", width: "auto" });
+
+function resize() {
+  const w = innerWidth - 320, h = innerHeight;
+  camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h);
+}
+addEventListener("resize", resize); resize();
+
+// --- look + move ---------------------------------------------------------
+const held = new Set();
+const euler = new THREE.Euler(0, 0, 0, "YXZ");
+addEventListener("keydown", e => held.add(e.code));
+addEventListener("keyup", e => held.delete(e.code));
+renderer.domElement.addEventListener("click", () => renderer.domElement.requestPointerLock());
+addEventListener("mousemove", e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  euler.setFromQuaternion(camera.quaternion);
+  euler.y -= e.movementX * 0.0022;
+  euler.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, euler.x - e.movementY * 0.0022));
+  camera.quaternion.setFromEuler(euler);
+});
+
+const step = new THREE.Vector3();
+let last = performance.now();
+renderer.setAnimationLoop(now => {
+  const dt = Math.min((now - last) / 1000, 0.1); last = now;
+  if (mode === "splat") {                       // the pano is a fixed viewpoint
+    const speed = (held.has("ShiftLeft") ? 1.2 : 3.0) * dt;
+    step.set(held.has("KeyD") - held.has("KeyA"), 0, held.has("KeyS") - held.has("KeyW"));
+    if (step.lengthSq()) camera.translateOnAxis(step.normalize(), speed);
+    if (held.has("Space")) camera.position.y += speed;
+    if (held.has("ShiftLeft")) camera.position.y -= speed;
+  }
+  renderer.render(scene, camera);
+});
+
+// --- loading -------------------------------------------------------------
+function clear() {
+  scene.background = null;
+  [...scene.children].forEach(o => { scene.remove(o); o.dispose?.(); });
+  camera.position.set(0, 0, 0);
+}
+
+function note(msg, sub = "") {
+  $("noteMsg").textContent = msg; $("noteSub").textContent = sub;
+  $("note").classList.remove("hide");
+}
+
+async function loadPano(job) {
+  clear();
+  note("loading 360 photo…");
+  const tex = await new THREE.TextureLoader().loadAsync(`/jobs/${job.id}/pano.png`);
+  tex.mapping = THREE.EquirectangularReflectionMapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  scene.background = tex;
+  $("note").classList.add("hide");
+}
+
+async function loadSplat(job) {
+  clear();
+  note("loading splats…", "a few MB, one moment");
+  const { SparkRenderer, SplatMesh } = await import("@sparkjsdev/spark");
+  const world = (await api(`/api/jobs/${job.id}`))?.world;
+  const urls = world?.assets?.splats?.spz_urls ?? {};
+  const url = urls["500k"] || urls.full_res || urls["100k"];
+  if (!url) return note("this world has no splat assets");
+
+  if (!spark) spark = new SparkRenderer({ renderer });
+  scene.add(spark);
+  const mesh = new SplatMesh({ url });
+  mesh.quaternion.set(1, 0, 0, 0);      // Marble splats are Y-down vs three.js
+  scene.add(mesh);
+  await mesh.initialized;
+  $("note").classList.add("hide");
+}
+
+async function show(job) {
+  current = job;
+  render();
+  if (job.status !== "done") return note(job.status, job.error ?? "still working…");
+  const hasPano = !!job.assets?.pano;
+  $("mPano").disabled = !hasPano;
+  if (mode === "pano" && !hasPano) mode = "splat";
+  try {
+    await (mode === "pano" ? loadPano(job) : loadSplat(job));
+  } catch (e) {
+    note("could not load this world", String(e.message ?? e));
+  }
+  $("meta").hidden = false;
+  $("meta").innerHTML = `
+    <p><b>${job.source ?? job.id}</b></p>
+    <p>${job.model} · ${job.estimated_credits ?? "?"} credits${job.took_seconds ? " · " + job.took_seconds + "s" : ""}</p>
+    ${job.marble_url ? `<p><a href="${job.marble_url}" target="_blank" rel="noopener">open in Marble ↗</a></p>` : ""}
+    <p style="margin-top:8px">${mode === "pano" ? "drag to look around" : "WASD to fly · click to look"}</p>`;
+}
+
+// --- job list ------------------------------------------------------------
+function render() {
+  $("list").innerHTML = jobs.map(j => {
+    const thumb = j.assets?.preview
+      ? `<img src="/jobs/${j.id}/${j.assets.preview}" alt="">`
+      : `<div class="ph">${j.status === "failed" ? "⚠" : "⋯"}</div>`;
+    const when = (j.created ?? "").replace("T", " ").slice(5, 16);
+    return `<div class="job ${current?.id === j.id ? "on" : ""}" data-id="${j.id}">
+      ${thumb}
+      <div>
+        <b>${j.source ?? j.id}</b>
+        <small><span class="tag ${j.status}">${j.status}</span> ${when}
+        ${j.status === "generating" && j.progress ? " · " + j.progress + "%" : ""}</small>
+      </div></div>`;
+  }).join("") || `<p style="padding:14px;color:#8b93a1;font-size:12px">
+    No captures yet. Take a screenshot in Minecraft, or POST one to <code>/capture</code>.</p>`;
+
+  $("list").querySelectorAll(".job").forEach(el =>
+    el.onclick = () => show(jobs.find(j => j.id === el.dataset.id)));
+}
+
+// --- polling -------------------------------------------------------------
+async function tick() {
+  const h = await api("/api/health");
+  $("health").innerHTML = h
+    ? `<span class="dot"></span><b>${Math.round(h.credits)}</b> credits · ${h.busy} running · ${h.queued} queued`
+    : `<span class="dot off"></span>server offline`;
+
+  const next = await api("/api/jobs");
+  if (next) {
+    const changed = JSON.stringify(next.map(j => [j.id, j.status, j.progress]))
+                 !== JSON.stringify(jobs.map(j => [j.id, j.status, j.progress]));
+    const fresh = next[0] && !jobs.some(j => j.id === next[0].id);
+    jobs = next;
+    if (changed) render();
+    // auto-open the newest finished world as it lands
+    if (fresh && next[0].status === "done") show(next[0]);
+    else if (!current && next.find(j => j.status === "done")) show(next.find(j => j.status === "done"));
+    else if (current) {
+      const mine = next.find(j => j.id === current.id);
+      if (mine && mine.status === "done" && current.status !== "done") show(mine);
+      else if (mine) current = mine;
+    }
+  }
+}
+setInterval(tick, 2000); tick();
+
+$("mPano").onclick = () => { mode = "pano"; if (current) show(current); syncModes(); };
+$("mSplat").onclick = () => { mode = "splat"; if (current) show(current); syncModes(); };
+function syncModes() {
+  $("mPano").classList.toggle("on", mode === "pano");
+  $("mSplat").classList.toggle("on", mode === "splat");
+}
+</script>
