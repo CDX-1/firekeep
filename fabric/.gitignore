@@ -25,3 +25,6 @@ run
 
 # Per-agent Minecraft game directories, created by AgentSupervisor
 run-agent-*
+
+# Eclipse/IDE compiled output
+bin/
