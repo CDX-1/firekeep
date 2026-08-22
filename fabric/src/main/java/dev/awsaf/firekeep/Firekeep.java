@@ -2,6 +2,7 @@ package dev.awsaf.firekeep;
 
 import dev.awsaf.firekeep.command.DroneCommand;
 import dev.awsaf.firekeep.entity.FirekeepEntities;
+import dev.awsaf.firekeep.live.WorldFeed;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.resources.Identifier;
@@ -19,6 +20,7 @@ public class Firekeep implements ModInitializer {
     @Override
     public void onInitialize() {
         FirekeepEntities.initialize();
+        WorldFeed.initialize();
 
         CommandRegistrationCallback.EVENT.register((dispatcher, buildContext, selection) ->
                 DroneCommand.register(dispatcher));

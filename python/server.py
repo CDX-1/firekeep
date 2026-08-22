@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import live
 import marble
 import worldmap
 
@@ -324,6 +325,31 @@ class Handler(BaseHTTPRequestHandler):
     # -- POST /capture ------------------------------------------------------
     def do_POST(self):
         url = urlparse(self.path)
+
+        # the mod's live world feed: every surface column that just changed
+        if url.path == "/api/live":
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > MAX_UPLOAD:
+                return self.send_json({"error": "bad body length"}, HTTPStatus.BAD_REQUEST)
+            try:
+                payload = json.loads(self.rfile.read(length))
+                delta, commands = live.ingest(payload)
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                return self.send_json({"error": f"bad live batch: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "columns": len(delta["columns"]) // 3,
+                                   "hot": delta["hot"], "watchers": live.subscriber_count(),
+                                   "commands": commands})
+
+        # send a drone somewhere; the mod picks this up on its next feed POST
+        if url.path == "/api/drones/goto":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                order = json.loads(self.rfile.read(max(0, length)))
+                queued = live.order(order["id"], order["x"], order["y"], order["z"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                return self.send_json({"error": f"bad order: {e}"}, HTTPStatus.BAD_REQUEST)
+            return self.send_json({"ok": True, "queued": queued}, HTTPStatus.ACCEPTED)
+
         if url.path != "/capture":
             return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -357,6 +383,51 @@ class Handler(BaseHTTPRequestHandler):
                         "estimated_credits": job["estimated_credits"],
                         "url": f"/api/jobs/{job['id']}"}, HTTPStatus.ACCEPTED)
 
+    # -- GET /api/world/stream ----------------------------------------------
+    def stream(self, dimension):
+        """
+        Server-sent events: one `hello` with where things stand, then a `delta` for every
+        batch the mod pushes. No Content-Length, so the connection is close-delimited.
+        """
+        sink = live.subscribe()
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream")
+            # no-transform stops the Next dev proxy gzipping the stream: compression
+            # buffers it, and a buffered event stream never reaches the browser
+            self.send_header("Cache-Control", "no-store, no-transform")
+            self.send_header("Content-Encoding", "identity")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+
+            self.wfile.write(live.sse("hello", live.snapshot(dimension)))
+            self.wfile.flush()
+
+            idle = time.monotonic()
+            while True:
+                try:
+                    event, data = sink.get(timeout=1.0)
+                except queue.Empty:
+                    if time.monotonic() - idle > live.HEARTBEAT:
+                        idle = time.monotonic()
+                        # a comment keeps proxies from closing an idle stream
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.write(live.sse("status", live.snapshot(dimension)))
+                        self.wfile.flush()
+                    continue
+
+                if data.get("dimension") != dimension:
+                    continue
+                idle = time.monotonic()
+                self.wfile.write(live.sse(event, data))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass                                    # the dashboard went away
+        finally:
+            live.unsubscribe(sink)
+
     # -- GET ----------------------------------------------------------------
     def do_GET(self):
         path = urlparse(self.path).path
@@ -368,10 +439,12 @@ class Handler(BaseHTTPRequestHandler):
                 bal = f"unavailable: {e}"
             with JOBS_LOCK:
                 busy = sum(1 for j in JOBS_BY_ID.values() if j["status"] == "generating")
+            feed = live.snapshot()
             return self.send_json({"ok": True, "credits": bal,
                                    "queued": WORK.qsize(), "busy": busy,
                                    "model": self.server.model,
-                                   "dry_run": self.server.key is None})
+                                   "dry_run": self.server.key is None,
+                                   "live": feed["live"], "watchers": live.subscriber_count()})
 
         if path == "/api/jobs":
             with JOBS_LOCK:
@@ -389,6 +462,30 @@ class Handler(BaseHTTPRequestHandler):
             if wf.is_file():
                 job["world"] = json.loads(wf.read_text())
             return self.send_json(job)
+
+        # -- the live feed from the mod ----------------------------------------
+        if path == "/api/live":
+            q = parse_qs(urlparse(self.path).query)
+            return self.send_json(live.snapshot((q.get("dimension") or ["minecraft:overworld"])[0]))
+
+        if path == "/api/world/live.png":
+            q = parse_qs(urlparse(self.path).query)
+            world = live.world((q.get("dimension") or ["minecraft:overworld"])[0])
+            png, meta = world.overlay() if world else (None, None)
+            if png is None:
+                return self.send_json({"error": "nothing live yet"}, HTTPStatus.NOT_FOUND)
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(png)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in meta.items():
+                self.send_header(f"X-Live-{k.replace('_', '-')}", str(v))
+            self.end_headers()
+            return self.wfile.write(png)
+
+        if path == "/api/world/stream":
+            q = parse_qs(urlparse(self.path).query)
+            return self.stream(( q.get("dimension") or ["minecraft:overworld"])[0])
 
         # -- the real Minecraft world, read straight off the save --------------
         if path == "/api/world" or path == "/api/world/map.png":

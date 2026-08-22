@@ -188,6 +188,24 @@ def section_lookup(chunk):
     return min_y, sections
 
 
+def paintable(sections, x, y, z, min_y):
+    """
+    Walks down to the first block in the column that a map would actually draw.
+
+    WORLD_SURFACE stops at anything that is not air, glass and barriers included, and those
+    have no map colour - taking them at face value paints a glass roof solid black. Vanilla
+    skips them, so this does too.
+
+    @return (block name, its y)
+    """
+    while y >= min_y:
+        name = block_at(sections, x, y, z)
+        if mapcolors.color(name) != mapcolors.BASE["none"]:
+            return name, y
+        y -= 1
+    return "minecraft:air", min_y
+
+
 def block_at(sections, x, y, z):
     """Block id at chunk-local x/z and world y, or air where nothing is stored."""
     entry = sections.get(y >> 4)
@@ -275,7 +293,7 @@ def render(save, dimension="overworld", limit=64):
                 row = (base_z + local_z) * width + base_x
                 for local_x in range(CHUNK):
                     top = surface[local_z * CHUNK + local_x]
-                    name = block_at(sections, local_x, top, local_z)
+                    name, top = paintable(sections, local_x, top, local_z, min_y)
                     if name in WATER:
                         bed = floor[local_z * CHUNK + local_x]
                         depths[row + local_x] = max(0, top - bed)

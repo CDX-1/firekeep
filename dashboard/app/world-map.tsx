@@ -6,6 +6,9 @@ import { AREA_QUADRANT, AREAS, DRONES, type Area } from "./drones";
 import { getWorld, worldMapUrl } from "@/lib/api";
 import type { WorldMeta } from "@/lib/types";
 import { fallbackWorld } from "./fallback-world";
+import { LiveLayer } from "./live-layer";
+import { DIMENSION, getLive, liveMapUrl, sendDroneTo, streamUrl,
+         type LiveDelta, type LiveDrone, type LiveSnapshot } from "@/lib/live";
 
 /**
  * Flight feel. A real DroneEntity cruises at 8 blocks/s, which would take a full
@@ -23,6 +26,9 @@ const MIN_SCALE = 0.12;   // screen pixels per block
 const MAX_SCALE = 12;
 const HIT_RADIUS = 15;    // screen pixels around a marker that count as a grab
 const DRAG_SLOP = 5;      // below this, a drag is really just a click
+
+/** Real drones the mod reports get their own colour, distinct from the mock roster. */
+const LIVE_COLOR = "#e2604a";
 
 const AREA_COLOR: Record<Area, string> = {
   Northeast: "#d0a06a",
@@ -65,7 +71,12 @@ export default function WorldMap({ active }: { active: boolean }) {
   const hoverRef = useRef<string | null>(null);
   const cursorRef = useRef<{ x: number; y: number } | null>(null);
   const fittedRef = useRef(false);
+  const layerRef = useRef<LiveLayer | null>(null);
+  const sessionRef = useRef<string>("");
+  const liveRef = useRef<LiveDrone[]>([]);
 
+  const [feed, setFeed] = useState<LiveSnapshot | null>(null);
+  const [liveDrones, setLiveDrones] = useState<LiveDrone[]>([]);
   const [backdrop, setBackdrop] = useState<Backdrop | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -90,6 +101,76 @@ export default function WorldMap({ active }: { active: boolean }) {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  /**
+   * Everything the mod knows, kept current.
+   *
+   * The stream only carries changes, so a dashboard opening mid-session first pulls the
+   * snapshot image the server keeps for exactly this reason, then patches it from there.
+   * A new session id means the world was restarted and the overlay is about somewhere else.
+   */
+  const seed = useCallback(async (snapshot: LiveSnapshot) => {
+    const layer = layerRef.current ?? (layerRef.current = new LiveLayer());
+    sessionRef.current = snapshot.session;
+    if (!snapshot.width || !snapshot.height) {
+      layer.reset({ origin_x: snapshot.origin_x, origin_z: snapshot.origin_z, width: 0, height: 0 });
+      return;
+    }
+    try {
+      layer.adopt(await loadImage(liveMapUrl(snapshot.dimension)), snapshot);
+    } catch {
+      layer.reset(snapshot);           // nothing live yet; the stream will fill it in
+    }
+    layer.seedHot(snapshot.fires ?? []);
+  }, []);
+
+  useEffect(() => {
+    let closed = false;
+    const source = new EventSource(streamUrl(DIMENSION));
+
+    const onSnapshot = (event: MessageEvent) => {
+      const snapshot = JSON.parse(event.data) as LiveSnapshot;
+      setFeed(snapshot);
+      setLiveDrones(snapshot.drones);
+      if (!closed && snapshot.session !== sessionRef.current) void seed(snapshot);
+    };
+
+    source.addEventListener("hello", onSnapshot);
+    source.addEventListener("status", onSnapshot);
+    source.addEventListener("delta", (event) => {
+      const delta = JSON.parse((event as MessageEvent).data) as LiveDelta;
+      if (delta.session !== sessionRef.current) {
+        // the world restarted under us; take the snapshot again rather than mixing them
+        void getLive(delta.dimension).then((snapshot) => {
+          setFeed(snapshot);
+          return seed(snapshot);
+        }).catch(() => undefined);
+        return;
+      }
+      layerRef.current?.apply(delta.columns);
+      setLiveDrones(delta.drones);
+      setFeed((current) => (current ? { ...current, hot: delta.hot, tick: delta.tick, age: 0, live: true } : current));
+    });
+
+    // EventSource retries on its own; surface the gap rather than fighting it
+    source.onerror = () => setFeed((current) => (current ? { ...current, live: false } : current));
+
+    return () => { closed = true; source.close(); };
+  }, [seed]);
+
+  useEffect(() => { liveRef.current = liveDrones; }, [liveDrones]);
+
+  // The feed goes quiet the moment Minecraft closes; age it out so the badge tells the truth.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setFeed((current) => {
+        if (!current || current.age === null) return current;
+        const age = current.age + 1;
+        return { ...current, age, live: age < 6 };
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Drop the drones into their quadrant as soon as we know how big the world is.
   useEffect(() => {
@@ -176,10 +257,14 @@ export default function WorldMap({ active }: { active: boolean }) {
       last = time;
 
       fly(dronesRef.current, dt);
+      layerRef.current?.flush();
       draw(canvasRef.current, backdrop, viewRef.current, dronesRef.current, {
         selected,
         hovered: hoverRef.current,
         drag: dragRef.current,
+        layer: layerRef.current,
+        live: liveRef.current,
+        time,
       });
 
       sinceRail += dt;
@@ -215,15 +300,19 @@ export default function WorldMap({ active }: { active: boolean }) {
     const meta = backdrop?.meta;
     if (!meta) return null;
     let best: { name: string; distance: number } | null = null;
-    for (const drone of dronesRef.current) {
-      const dx = (drone.x - meta.origin_x) * view.scale + view.x - sx;
-      const dy = (drone.z - meta.origin_z) * view.scale + view.y - sy;
+    const consider = (name: string, worldX: number, worldZ: number) => {
+      const dx = (worldX - meta.origin_x) * view.scale + view.x - sx;
+      const dy = (worldZ - meta.origin_z) * view.scale + view.y - sy;
       const distance = Math.hypot(dx, dy);
       if (distance <= HIT_RADIUS && (!best || distance < best.distance)) {
-        best = { name: drone.name, distance };
+        best = { name, distance };
       }
-    }
-    return best?.name ?? null;
+    };
+
+    // real drones sit on top, so they win a tie against the mock roster
+    for (const drone of dronesRef.current) consider(drone.name, drone.x, drone.z);
+    for (const drone of liveRef.current) consider(drone.id, drone.x, drone.z);
+    return best === null ? null : (best as { name: string }).name;
   }, [backdrop]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -271,16 +360,23 @@ export default function WorldMap({ active }: { active: boolean }) {
     }
 
     // A short drag out of a drone was a click; a real one is a flight order.
-    if (drag.kind === "aim" && drag.moved > DRAG_SLOP) {
-      const drone = dronesRef.current.find((d) => d.name === drag.drone);
-      const meta = backdrop?.meta;
-      if (drone && meta) {
-        const target = toWorld(drag.toX, drag.toY);
-        drone.target = {
-          x: clamp(target.x, meta.origin_x, meta.origin_x + meta.width - 1),
-          z: clamp(target.z, meta.origin_z, meta.origin_z + meta.height - 1),
-        };
-      }
+    if (drag.kind !== "aim" || drag.moved <= DRAG_SLOP) return;
+    const target = toWorld(drag.toX, drag.toY);
+
+    const real = liveRef.current.find((d) => d.id === drag.drone);
+    if (real) {
+      // a real drone is the mod's to move: post the order and let the feed show the result
+      void sendDroneTo(real.id, target.x, real.y, target.z).catch(() => undefined);
+      return;
+    }
+
+    const drone = dronesRef.current.find((d) => d.name === drag.drone);
+    const meta = backdrop?.meta;
+    if (drone && meta) {
+      drone.target = {
+        x: clamp(target.x, meta.origin_x, meta.origin_x + meta.width - 1),
+        z: clamp(target.z, meta.origin_z, meta.origin_z + meta.height - 1),
+      };
     }
   };
 
@@ -303,18 +399,22 @@ export default function WorldMap({ active }: { active: boolean }) {
 
   // ---------------------------------------------------------------- commands
 
-  const centerOn = useCallback((name: string) => {
+  const centerOnPoint = useCallback((worldX: number, worldZ: number) => {
     const stage = stageRef.current;
     const meta = backdrop?.meta;
-    const drone = dronesRef.current.find((d) => d.name === name);
-    if (!stage || !meta || !drone) return;
+    if (!stage || !meta) return;
     const { scale } = viewRef.current;
     viewRef.current = {
       scale,
-      x: stage.clientWidth / 2 - (drone.x - meta.origin_x) * scale,
-      y: stage.clientHeight / 2 - (drone.z - meta.origin_z) * scale,
+      x: stage.clientWidth / 2 - (worldX - meta.origin_x) * scale,
+      y: stage.clientHeight / 2 - (worldZ - meta.origin_z) * scale,
     };
   }, [backdrop]);
+
+  const centerOn = useCallback((name: string) => {
+    const drone = dronesRef.current.find((d) => d.name === name);
+    if (drone) centerOnPoint(drone.x, drone.z);
+  }, [centerOnPoint]);
 
   const holdSelected = useCallback(() => {
     const drone = dronesRef.current.find((d) => d.name === selected);
@@ -323,6 +423,7 @@ export default function WorldMap({ active }: { active: boolean }) {
 
   const flying = dronesRef.current.filter((drone) => drone.target !== null).length;
   const selectedDrone = dronesRef.current.find((drone) => drone.name === selected) ?? null;
+  const selectedLive = liveDrones.find((drone) => drone.id === selected) ?? null;
   const meta = backdrop?.meta;
 
   const bounds = useMemo(() => {
@@ -351,6 +452,7 @@ export default function WorldMap({ active }: { active: boolean }) {
 
         <div className={styles.hint} aria-hidden="true">
           Drag an arrow out of a drone to send it there &middot; drag the map to pan &middot; scroll to zoom
+          {feed?.live && " · the mod is streaming changes as they happen"}
         </div>
 
         <div className={styles.zoomControls}>
@@ -365,6 +467,14 @@ export default function WorldMap({ active }: { active: boolean }) {
           </span>
           {meta && <span>{meta.width}&times;{meta.height} blocks &middot; {meta.chunks} chunks</span>}
           {bounds && <span>X {bounds.x[0]} to {bounds.x[1]} &middot; Z {bounds.z[0]} to {bounds.z[1]}</span>}
+          <span className={styles.feedState} data-live={feed?.live ?? false}>
+            {feed?.live
+              ? `live · tick ${feed.tick}`
+              : feed?.age == null ? "no mod feed" : `stale ${Math.round(feed.age)}s`}
+          </span>
+          {(feed?.hot ?? 0) > 0 && (
+            <span className={styles.fires}>{feed?.hot} burning</span>
+          )}
           <span className={styles.spacer} />
           <span>{cursor ? `X ${Math.floor(cursor.x)}  Z ${Math.floor(cursor.z)}` : "—"}</span>
           <span>{zoom >= 1 ? `${zoom.toFixed(1)}×` : `1/${(1 / zoom).toFixed(1)}×`}</span>
@@ -385,6 +495,26 @@ export default function WorldMap({ active }: { active: boolean }) {
           <span>Drones</span>
           <span>{flying ? `${flying} in transit` : "all holding"}</span>
         </header>
+        {liveDrones.length > 0 && (
+          <section className={styles.liveSection}>
+            <p className={styles.areaLabel}><i style={{ background: LIVE_COLOR }} />In world</p>
+            <ul>
+              {liveDrones.map((drone) => (
+                <li key={drone.id}>
+                  <button
+                    type="button"
+                    data-active={selected === drone.id}
+                    onClick={() => { setSelected(drone.id); centerOnPoint(drone.x, drone.z); }}
+                  >
+                    <span>{drone.id}</span>
+                    <span className={styles.coords}>{Math.round(drone.x)}, {Math.round(drone.z)}</span>
+                    {drone.target && <span className={styles.transit} aria-label="in transit" />}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         <ul>
           {AREAS.map((area) => (
             <li key={area}>
@@ -410,7 +540,17 @@ export default function WorldMap({ active }: { active: boolean }) {
           ))}
         </ul>
         <footer>
-          {selectedDrone ? (
+          {selectedLive ? (
+            <>
+              <p>{selectedLive.id}</p>
+              <p className={styles.coords}>
+                {selectedLive.target
+                  ? `flying to ${Math.round(selectedLive.target[0])}, ${Math.round(selectedLive.target[2])}`
+                  : `holding at y ${Math.round(selectedLive.y)}`}
+              </p>
+              <p className={styles.coords}>Drag it on the map to send it somewhere.</p>
+            </>
+          ) : selectedDrone ? (
             <>
               <p>{selectedDrone.name}</p>
               <p className={styles.coords}>
@@ -475,7 +615,14 @@ function fly(drones: MapDrone[], dt: number) {
 // --------------------------------------------------------------------------
 // rendering
 
-type Overlay = { selected: string | null; hovered: string | null; drag: Drag | null };
+type Overlay = {
+  selected: string | null;
+  hovered: string | null;
+  drag: Drag | null;
+  layer: LiveLayer | null;
+  live: LiveDrone[];
+  time: number;
+};
 
 function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, drones: MapDrone[], overlay: Overlay) {
   if (!canvas) return;
@@ -507,12 +654,23 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
   ctx.imageSmoothingEnabled = view.scale < 1;
   ctx.drawImage(backdrop.image, view.x, view.y, meta.width * view.scale, meta.height * view.scale);
 
+  // whatever the mod has told us since the last save goes straight on top
+  const layer = overlay.layer;
+  if (layer?.ready) {
+    ctx.drawImage(layer.surface, toScreenX(layer.originX), toScreenY(layer.originZ),
+      layer.width * view.scale, layer.height * view.scale);
+  }
+
   ctx.save();
   ctx.beginPath();
   ctx.rect(view.x, view.y, meta.width * view.scale, meta.height * view.scale);
   ctx.clip();
   drawGrid(ctx, meta, view, width, height);
   ctx.restore();
+
+  if (layer?.ready && layer.hot > 0) {
+    drawFire(ctx, layer, view, toScreenX(layer.originX), toScreenY(layer.originZ), overlay.time);
+  }
 
   // drag arrow first, so markers sit on top of it
   const aim = overlay.drag?.kind === "aim" ? overlay.drag : null;
@@ -524,6 +682,20 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
     }
   }
 
+  for (const drone of overlay.live) {
+    const x = toScreenX(drone.x);
+    const y = toScreenY(drone.z);
+    if (x < -60 || y < -60 || x > width + 60 || y > height + 60) continue;
+    if (drone.target) {
+      drawRoute(ctx, x, y, toScreenX(drone.target[0]), toScreenY(drone.target[2]), LIVE_COLOR);
+    }
+    drawDrone(ctx, x, y, { name: drone.id, yaw: (drone.yaw - 90) * Math.PI / 180 }, LIVE_COLOR, {
+      selected: overlay.selected === drone.id,
+      hovered: overlay.hovered === drone.id,
+      labelled: true,
+    });
+  }
+
   for (const drone of drones) {
     const x = toScreenX(drone.x);
     const y = toScreenY(drone.z);
@@ -532,12 +704,41 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
     if (drone.target) {
       drawRoute(ctx, x, y, toScreenX(drone.target.x), toScreenY(drone.target.z), AREA_COLOR[drone.area]);
     }
-    drawDrone(ctx, x, y, drone, {
+    drawDrone(ctx, x, y, drone, AREA_COLOR[drone.area], {
       selected: overlay.selected === drone.name,
       hovered: overlay.hovered === drone.name,
       labelled: overlay.selected === drone.name || overlay.hovered === drone.name || view.scale > 0.9,
     });
   }
+}
+
+/**
+ * The glow over burning columns.
+ *
+ * The heat buffer is one white dot per fire, so blurring it additively costs the same
+ * whether three blocks are alight or three thousand - which matters, because a fire that
+ * has got away from you is exactly when the map needs to stay smooth.
+ */
+function drawFire(ctx: CanvasRenderingContext2D, layer: LiveLayer, view: View,
+                  x: number, y: number, time: number) {
+  const w = layer.width * view.scale;
+  const h = layer.height * view.scale;
+  const pulse = 0.42 + 0.18 * Math.sin(time / 320);
+  const blur = Math.max(2, Math.min(18, view.scale * 2.6));
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.imageSmoothingEnabled = true;
+
+  ctx.globalAlpha = pulse * 0.55;
+  ctx.filter = `blur(${blur.toFixed(1)}px)`;
+  ctx.drawImage(layer.heat, x, y, w, h);
+
+  // a tighter, hotter core inside the halo
+  ctx.globalAlpha = pulse;
+  ctx.filter = `blur(${(blur / 3).toFixed(1)}px)`;
+  ctx.drawImage(layer.heat, x, y, w, h);
+  ctx.restore();
 }
 
 function drawGrid(ctx: CanvasRenderingContext2D, meta: WorldMeta, view: View, width: number, height: number) {
@@ -572,10 +773,10 @@ function drawDrone(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
-  drone: MapDrone,
+  drone: { name: string; yaw: number },
+  color: string,
   state: { selected: boolean; hovered: boolean; labelled: boolean },
 ) {
-  const color = AREA_COLOR[drone.area];
   const radius = state.selected ? 8 : 7;
 
   ctx.save();

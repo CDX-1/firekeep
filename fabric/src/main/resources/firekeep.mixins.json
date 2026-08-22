@@ -4,6 +4,7 @@
   "package": "dev.awsaf.firekeep.mixin",
   "compatibilityLevel": "JAVA_25",
   "mixins": [
+    "LevelChunkMixin"
   ],
   "injectors": {
     "defaultRequire": 1

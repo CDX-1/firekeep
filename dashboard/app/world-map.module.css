@@ -58,3 +58,15 @@
 
 .rail > ul { -ms-overflow-style: none; scrollbar-width: none; }
 .rail > ul::-webkit-scrollbar { display: none; }
+
+.feedState { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.feedState::before { width: 5px; height: 5px; content: ""; background: var(--muted); border-radius: 50%; }
+.feedState[data-live="true"] { color: #cae0da; }
+.feedState[data-live="true"]::before { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: livePulse 1.6s ease-in-out infinite; }
+.fires { display: flex; align-items: center; gap: 6px; color: #e2a08a; }
+.fires::before { width: 5px; height: 5px; content: ""; background: #e2604a; border-radius: 50%; box-shadow: 0 0 0 3px rgba(226, 96, 74, .18); animation: livePulse 900ms ease-in-out infinite; }
+.liveSection { padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+.liveSection ul { margin: 0; padding: 0 0 4px; list-style: none; }
+
+@keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .feedState[data-live="true"]::before, .fires::before { animation: none; } }
