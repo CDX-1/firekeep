@@ -51,3 +51,7 @@ export function MapIcon() {
 export function FlameIcon() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.2c2.6 3.1 4.3 5.3 4.3 7.6a3.1 3.1 0 0 1-2 2.9c.5-1.6.1-3.1-1-4.4-.4 2.6-1.8 3.4-3 4.7A5 5 0 0 0 9 17.3a5.2 5.2 0 0 0 3 4.5 5.6 5.6 0 0 1-6.2-5.6c0-4 3.6-5.7 4.3-9.6.1-.8.1-1.7 0-2.5a10 10 0 0 0 1.9-1Z" /><path d="M12 21.8a5.6 5.6 0 0 0 6.2-5.6" /></svg>;
 }
+
+export function ActivityIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>;
+}

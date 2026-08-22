@@ -5,12 +5,14 @@ import styles from "./page.module.css";
 import GeneratedWorlds from "./generated-worlds";
 import LiveMonitoring from "./live-monitoring";
 import WorldMap from "./world-map";
-import { FlameIcon, GridIcon, MapIcon, SearchIcon, WorldsIcon } from "./icons";
+import RiskMap from "./risk-map";
+import { ActivityIcon, FlameIcon, GridIcon, MapIcon, SearchIcon, WorldsIcon } from "./icons";
 
 const TABS = [
   { id: "feeds", label: "Camera feeds", title: "Live Monitoring", Icon: GridIcon },
   { id: "map", label: "World map", title: "World Map", Icon: MapIcon },
   { id: "sim", label: "Disaster sim", title: "Disaster Simulation", Icon: FlameIcon },
+  { id: "predictions", label: "Predictions", title: "Fire Risk Predictions", Icon: ActivityIcon },
   { id: "worlds", label: "Generated worlds", title: "Generated Worlds", Icon: WorldsIcon },
 ] as const;
 
@@ -94,6 +96,16 @@ export default function Dashboard() {
           mode={tab === "sim" ? "simulate" : "drones"}
           onOpenDroneFeed={openDroneFeed}
         />
+      </div>
+
+      <div
+        className={styles.panel}
+        id="panel-predictions"
+        role="tabpanel"
+        aria-labelledby="tab-predictions"
+        hidden={tab !== "predictions"}
+      >
+        <RiskMap active={tab === "predictions"} />
       </div>
 
       <div

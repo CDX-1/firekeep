@@ -1,0 +1,279 @@
+.riskMap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(190px, 17vw, 240px);
+  gap: clamp(14px, 1.6vw, 22px);
+  height: 100%;
+  min-height: 0;
+}
+
+/* ---- stage ---- */
+.stage {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background: #0c0d0c;
+  outline: 1px solid var(--line);
+  outline-offset: -1px;
+  border-radius: 8px;
+}
+
+.mapCanvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.gridCanvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+.gridCanvas[data-dragging] { cursor: grabbing; }
+
+/* ---- cell popup ---- */
+.popup {
+  position: absolute;
+  z-index: 10;
+  min-width: 220px;
+  background: rgba(14, 16, 15, 0.97);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 2px 8px rgba(0,0,0,0.4);
+  pointer-events: auto;
+}
+
+.popupRisk {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.popupRisk strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.popupRiskDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.popupScore {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+}
+
+.popupGrid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 12px;
+  align-items: baseline;
+}
+.popupKey {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.popupVal {
+  font-size: 12px;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- zoom / status (same as world-map) ---- */
+.zoomControls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  gap: 4px;
+  z-index: 5;
+}
+.zoomControls button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: var(--text);
+  background: rgba(20, 23, 21, 0.88);
+  border: 0;
+  outline: 1px solid var(--line);
+  outline-offset: -1px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: outline-color 100ms ease, background-color 100ms ease;
+}
+.zoomControls button:hover { outline-color: var(--accent); background: rgba(34, 42, 39, 0.94); }
+.wide { font-size: 10px !important; }
+
+.hint {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  padding: 5px 9px;
+  color: var(--muted);
+  background: rgba(8, 10, 9, 0.72);
+  border-radius: 4px;
+  font-size: 10px;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  z-index: 5;
+}
+
+.status {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 11px;
+  color: var(--muted);
+  background: linear-gradient(rgba(8, 10, 9, 0.4), rgba(8, 10, 9, 0.88));
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  z-index: 5;
+}
+.spacer { flex: 1; }
+
+/* ---- legend ---- */
+.legend {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: #141414;
+  border-radius: 5px;
+}
+
+.legendHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 12px 13px 10px;
+  color: var(--text);
+  font-size: 12px;
+}
+.legendSub { color: var(--muted); font-size: 10px; }
+
+.legendScale {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 0 6px;
+  scrollbar-width: none;
+}
+.legendScale::-webkit-scrollbar { display: none; }
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 13px;
+  transition: background 80ms ease;
+}
+.legendItem:hover { background: rgba(255,255,255,0.025); }
+
+.legendSwatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.legendLevel {
+  width: 14px;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  text-align: right;
+}
+.legendLabel {
+  font-size: 11px;
+  color: var(--text);
+}
+
+.legendDivider {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 0;
+}
+
+.legendInfo {
+  padding: 8px 13px 10px;
+}
+.legendInfoTitle {
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: var(--text);
+}
+.legendInfoBody {
+  margin: 0;
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.legendStats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--line);
+  border-top: 1px solid var(--line);
+}
+.legendStat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: #141414;
+}
+.legendStatClickable {
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.legendStatClickable:hover {
+  background: rgba(255,255,255,0.06);
+}
+.legendStatLabel {
+  font-size: 9px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.legendStatValue {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  font-family: ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+  .riskMap {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(120px, 32dvh);
+    gap: 12px;
+  }
+  .hint { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zoomControls button { transition: none; }
+}
