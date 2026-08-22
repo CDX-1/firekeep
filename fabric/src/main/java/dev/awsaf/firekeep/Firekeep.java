@@ -4,6 +4,7 @@ import dev.awsaf.firekeep.agent.AgentDirectoryServer;
 import dev.awsaf.firekeep.agent.AgentSupervisor;
 import dev.awsaf.firekeep.agent.DroneAgents;
 import dev.awsaf.firekeep.command.DroneCommand;
+import dev.awsaf.firekeep.drone.DroneManager;
 import dev.awsaf.firekeep.entity.FirekeepEntities;
 import dev.awsaf.firekeep.live.WorldFeed;
 import net.fabricmc.api.ModInitializer;
@@ -25,6 +26,7 @@ public class Firekeep implements ModInitializer {
         FirekeepEntities.initialize();
         WorldFeed.initialize();
         DroneAgents.initialize();
+        DroneManager.initialize();
         AgentSupervisor.initialize();
         AgentDirectoryServer.initialize();
 

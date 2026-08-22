@@ -1,0 +1,5 @@
+{
+  "command": "look",
+  "at": { "x": 120, "y": 82, "z": -40 },
+  "await": true
+}

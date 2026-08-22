@@ -1,0 +1,145 @@
+{
+  "name": "Firekeep 1 \u2014 Connection test",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "run-once",
+      "name": "Run once",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f0",
+              "name": "droneApi",
+              "value": "http://127.0.0.1:8090",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Set droneApi to wherever the Fabric mod's API is reachable from THIS n8n. Local n8n: http://127.0.0.1:8090. n8n Cloud: your tunnel's https URL."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.droneApi }}/api/health",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "health-(no-key-needed)",
+      "name": "Health (no key needed)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.droneApi }}/api/drones",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "roster-(key-required)",
+      "name": "Roster (key required)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns the two probes into one plain answer, so a failed setup says why.\nconst health = $('Health (no key needed)').first().json;\nconst roster = $('Roster (key required)').first().json;\n\nconst reachable = health && health.ok === true;\nconst authorised = roster && Array.isArray(roster.drones);\n\nlet verdict;\nif (!reachable) {\n  verdict = 'CANNOT REACH THE MOD. Check that the Minecraft server is running, that droneApi '\n          + 'points at it, and \u2014 on n8n Cloud \u2014 that your tunnel is up.';\n} else if (!authorised) {\n  verdict = 'REACHED THE MOD BUT WAS REJECTED. Attach the \"Firekeep Drone API\" header-auth '\n          + 'credential (X-API-Key = the apiKey from config/firekeep-drones.json) to the roster node.';\n} else if (roster.count === 0) {\n  verdict = 'WORKING, but there are no drones yet. Spawn one: /drone spawn ~ ~5 ~ drone_01';\n} else {\n  verdict = `WORKING. ${roster.count} drone(s): ` + roster.drones.map(d => `${d.id} (${d.status})`).join(', ');\n}\n\nreturn [{ json: {\n  verdict,\n  reachable,\n  authorised,\n  perception_radius: health && health.perception_radius,\n  webhook_configured: health && health.webhook_configured,\n  webhook_online: health && health.webhook_online,\n  drones: roster && roster.drones,\n} }];"
+      },
+      "id": "verdict",
+      "name": "Verdict",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Run once": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Health (no key needed)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Roster (key required)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Roster (key required)": {
+      "main": [
+        [
+          {
+            "node": "Verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

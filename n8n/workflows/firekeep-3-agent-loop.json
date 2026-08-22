@@ -1,0 +1,440 @@
+{
+  "name": "Firekeep 3 \u2014 Autonomous fire response",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "firekeep-events",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "mod-events",
+      "name": "Mod events",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -560,
+        0
+      ],
+      "webhookId": "firekeep-events-hook"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f0",
+              "name": "droneApi",
+              "value": "http://127.0.0.1:8090",
+              "type": "string"
+            },
+            {
+              "id": "f1",
+              "name": "llmUrl",
+              "value": "https://api.openai.com/v1/chat/completions",
+              "type": "string"
+            },
+            {
+              "id": "f2",
+              "name": "llmModel",
+              "value": "gpt-4o-mini",
+              "type": "string"
+            },
+            {
+              "id": "f3",
+              "name": "maxSteps",
+              "value": "12",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -360,
+        0
+      ],
+      "notes": "droneApi: where the mod is reachable from THIS n8n (a tunnel URL on n8n Cloud). llmUrl/llmModel: any OpenAI-compatible chat-completions endpoint. maxSteps caps how many commands one mission may spend."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decides whether this event starts a mission, continues one, or is none of our business.\n//\n// The loop this sits in is: the mod reports something -> the model picks the next high-level\n// command -> the mod carries it out and reports again. Every guard here exists to make sure\n// that loop can always end.\nconst event = $json;\nconst cfg = $('Config').first().json;\nconst maxSteps = Number(cfg.maxSteps || 12);\n\nconst store = $getWorkflowStaticData('global');\nstore.missions = store.missions || {};\nconst now = Date.now();\n\n// A mission that has gone quiet is over, whatever happened to it. Without this a drone that\n// dropped off mid-flight would keep its step count forever and never fly again.\nfor (const [id, m] of Object.entries(store.missions)) {\n  if (now - m.updated > 15 * 60 * 1000) delete store.missions[id];\n}\n\nconst name = event.event;\nconst droneId = event.drone_id;\n\nconst STARTS = ['fire_detected', 'disaster_detected'];\n// Everything the mod reports when a command it was given has run its course.\nconst CONTINUES = ['drone_arrived', 'drone_stuck', 'command_failed', 'water_dispensed', 'drone_damaged'];\n\nif (STARTS.includes(name)) {\n  return [{ json: {\n    action: 'dispatch',\n    event: name,\n    location: event.location,\n    reason: `${event.hazard || 'fire'} of ${event.size || '?'} blocks reported by ${droneId} `\n          + `(${event.severity || 'unknown'} severity, ${event.terrain || 'unknown terrain'})`,\n  } }];\n}\n\nif (!CONTINUES.includes(name)) {\n  return [];                       // spawned, removed, offline: nothing to decide\n}\n\nconst mission = store.missions[droneId];\nif (!mission) {\n  return [];                       // this drone is not on a mission of ours - patrol, or a human\n}\n\n// Arriving home, or being told to hold, is how a mission ends.\nif (name === 'drone_arrived' && (event.command === 'return_home' || event.command === 'hover')) {\n  delete store.missions[droneId];\n  return [];\n}\n\nmission.steps += 1;\nmission.updated = now;\n\n// Two steps past the budget the model has had its chance; stop rather than keep paying for it.\nif (mission.steps > maxSteps + 2) {\n  delete store.missions[droneId];\n  return [];\n}\n\nreturn [{ json: {\n  action: 'assess',\n  event: name,\n  drone_id: droneId,\n  step: mission.steps,\n  mustFinish: mission.steps > maxSteps,\n  reason: mission.reason,\n  lastOutcome: {\n    event: name,\n    command: event.command || null,\n    reason: event.reason || null,\n    extinguished: event.extinguished ?? null,\n    hazard: event.hazard || null,\n  },\n} }];"
+      },
+      "id": "plan",
+      "name": "Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-dispatch",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "dispatch",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "needs-a-drone",
+      "name": "Needs a drone",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        40,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.droneApi }}/api/dispatch",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ x: $json.location.x, y: $json.location.y + 6, z: $json.location.z }) }}"
+      },
+      "id": "dispatch-nearest",
+      "name": "Dispatch nearest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The mod picked the drone, because it is the only side that knows where they all are.\nconst reply = $json;\nconst plan = $('Plan').first().json;\n\nif (!reply || reply.dispatched !== true) {\n  // Nobody free. The mod re-reports a fire once its cooldown lapses, so this is a pause,\n  // not a loss - but it is worth seeing in the execution log.\n  console.log('no drone available for:', plan.reason);\n  return [];\n}\n\nconst store = $getWorkflowStaticData('global');\nstore.missions = store.missions || {};\nstore.missions[reply.drone_id] = { steps: 1, updated: Date.now(), reason: plan.reason };\n\nreturn [{ json: {\n  action: 'assess',\n  event: plan.event,\n  drone_id: reply.drone_id,\n  step: 1,\n  mustFinish: false,\n  reason: plan.reason,\n  lastOutcome: { event: 'dispatched', command: 'move_to', reason: null },\n} }];"
+      },
+      "id": "assess",
+      "name": "Assess",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        -120
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "mission",
+      "name": "Mission",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        620,
+        0
+      ],
+      "notes": "Where the two branches meet. Everything downstream reads the mission from here, so it does not matter which way the item arrived."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.droneApi }}/api/drones/{{ $json.drone_id }}/perception?fresh=true",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "look-around",
+      "name": "Look around",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.droneApi }}/api/drones",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "fleet",
+      "name": "Fleet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds the one request the model sees. Everything it needs is already a fact: the mod did\n// the perceiving, so there is no image, no raw block data, and nothing to count.\nconst state = $('Mission').first().json;      // the join point, so this works on either branch\nconst view = $('Look around').first().json;\nconst fleet = $json && Array.isArray($json.drones) ? $json : { drones: [] };\nconst cfg = $('Config').first().json;\n\nif (!view || !view.environment) {\n  // The perception call failed - a tunnel that dropped, a drone that was removed mid-mission.\n  // Stopping is better than asking a model to reason about an error object.\n  console.log('no perception for', state.drone_id, JSON.stringify(view).slice(0, 300));\n  return [];\n}\n\nconst system = [\n  'You command a firefighting drone inside Minecraft. You choose ONE high-level command at a time.',\n  'The mod flies the drone for you: it handles pathfinding, obstacle avoidance and collision.',\n  'Never think about frame-by-frame movement. Never invent coordinates you were not given.',\n  '',\n  'Reply with JSON only, in this exact shape:',\n  '{\"reasoning\": \"<one short sentence>\", \"command\": { ... }}',\n  '',\n  'The command must be exactly one of:',\n  '  {\"command\":\"move\",\"direction\":\"north|northeast|east|southeast|south|southwest|west|northwest|up|down\",\"distance\":<1-32>}',\n  '  {\"command\":\"move_to\",\"x\":<n>,\"y\":<n>,\"z\":<n>}',\n  '  {\"command\":\"dispense_water\",\"radius\":<1-8>}   // puts out fire on the ground BELOW the drone',\n  '  {\"command\":\"return_home\"}                     // ends the mission',\n  '  {\"command\":\"hover\"}                           // ends the mission, holding position',\n  '',\n  'How to fight a fire:',\n  '  1. Get above it. dispense_water only affects the ground directly beneath the drone,',\n  '     so move_to the hazard position with y set 4-8 blocks ABOVE the hazard.',\n  '  2. dispense_water. A radius of 3-5 covers most fires.',\n  '  3. Look at the next perception. If hazards are gone, return_home. If fire remains,',\n  '     move over the nearest remaining hazard and drop again.',\n  '  4. If the last command failed with \"no fire within N blocks\", you are not over it:',\n  '     move_to the hazard position again, or raise the radius.',\n  '  5. If the drone is stuck, move up 6-10 blocks first, then try again from higher up.',\n  '',\n  'Reading the perception:',\n  '  - \"hazards\", \"obstacles\" and \"resources\" give a direction, a distance and a real position.',\n  '  - \"clearance\" is how many blocks are free each way at the drone\\'s own altitude.',\n  '  - \"local_map.grid\" is a top-down picture: north is the top row, east is right, D is you.',\n  '  - \"altitude_above_ground\" is how high you are; stay above 3 unless dropping water.',\n].join('\\n');\n\nconst user = {\n  mission: state.reason,\n  step: state.step,\n  step_budget: Number(cfg.maxSteps || 12),\n  must_finish_now: state.mustFinish === true,\n  what_just_happened: state.lastOutcome,\n  drone: view,\n  other_drones: (fleet.drones || [])\n    .filter(d => d.id !== state.drone_id)\n    .map(d => ({ id: d.id, status: d.status, position: d.position })),\n};\n\nconst instruction = state.mustFinish\n  ? 'You have used your step budget. Reply with return_home or hover and nothing else.'\n  : 'Choose the single best next command.';\n\nreturn [{ json: {\n  drone_id: state.drone_id,\n  body: {\n    model: cfg.llmModel,\n    temperature: 0.1,\n    response_format: { type: 'json_object' },\n    messages: [\n      { role: 'system', content: system },\n      { role: 'user', content: instruction + '\\n\\n' + JSON.stringify(user, null, 1) },\n    ],\n  },\n} }];"
+      },
+      "id": "build-prompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.llmUrl }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}"
+      },
+      "id": "ask-the-model",
+      "name": "Ask the model",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The model is untrusted input: anything it sends that is not one of the five commands is\n// dropped rather than forwarded to a server that can set blocks on fire.\nconst ALLOWED = ['move', 'move_to', 'dispense_water', 'return_home', 'hover'];\nconst DIRECTIONS = ['north','northeast','east','southeast','south','southwest','west','northwest','up','down'];\n\nconst droneId = $('Build prompt').first().json.drone_id;\nconst reply = $json;\n\nlet text = reply?.choices?.[0]?.message?.content;\nif (typeof text !== 'string' || !text.trim()) {\n  console.log('model returned nothing usable:', JSON.stringify(reply).slice(0, 400));\n  return [];\n}\n\n// Models fence their JSON often enough that stripping it is cheaper than re-prompting.\ntext = text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();\n\nlet decision;\ntry {\n  decision = JSON.parse(text);\n} catch (e) {\n  const match = text.match(/\\{[\\s\\S]*\\}/);\n  if (!match) { console.log('model did not return JSON:', text.slice(0, 300)); return []; }\n  try { decision = JSON.parse(match[0]); }\n  catch (e2) { console.log('model JSON did not parse:', text.slice(0, 300)); return []; }\n}\n\nconst command = decision.command;\nif (!command || !ALLOWED.includes(command.command)) {\n  console.log('rejected command:', JSON.stringify(command));\n  return [];\n}\n\n// Normalise the arguments the mod would reject anyway, so a near-miss still flies.\nif (command.command === 'move') {\n  if (!DIRECTIONS.includes(String(command.direction || '').toLowerCase())) {\n    console.log('rejected direction:', command.direction); return [];\n  }\n  command.direction = String(command.direction).toLowerCase();\n  command.distance = Math.max(1, Math.min(32, Number(command.distance) || 5));\n}\nif (command.command === 'move_to') {\n  for (const axis of ['x', 'y', 'z']) {\n    if (!Number.isFinite(Number(command[axis]))) { console.log('move_to missing', axis); return []; }\n    command[axis] = Number(command[axis]);\n  }\n}\nif (command.command === 'dispense_water') {\n  command.radius = Math.max(1, Math.min(8, Number(command.radius) || 4));\n}\n\n// hover ends the mission here: unlike the others it finishes instantly and reports nothing,\n// so nothing would ever come back to close the loop.\nif (command.command === 'hover') {\n  const store = $getWorkflowStaticData('global');\n  if (store.missions) delete store.missions[droneId];\n}\n\nreturn [{ json: { drone_id: droneId, command, reasoning: decision.reasoning || '' } }];"
+      },
+      "id": "read-decision",
+      "name": "Read decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.droneApi }}/api/drones/{{ $json.drone_id }}/command",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.command) }}"
+      },
+      "id": "send-command",
+      "name": "Send command",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1720,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Mod events": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan": {
+      "main": [
+        [
+          {
+            "node": "Needs a drone",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs a drone": {
+      "main": [
+        [
+          {
+            "node": "Dispatch nearest",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatch nearest": {
+      "main": [
+        [
+          {
+            "node": "Assess",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assess": {
+      "main": [
+        [
+          {
+            "node": "Mission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mission": {
+      "main": [
+        [
+          {
+            "node": "Look around",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Look around": {
+      "main": [
+        [
+          {
+            "node": "Fleet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fleet": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask the model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask the model": {
+      "main": [
+        [
+          {
+            "node": "Read decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read decision": {
+      "main": [
+        [
+          {
+            "node": "Send command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

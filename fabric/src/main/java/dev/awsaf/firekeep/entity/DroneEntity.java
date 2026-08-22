@@ -60,6 +60,8 @@ public class DroneEntity extends Entity {
     private double inputUp;
     /** -1 look left, +1 look right; applied at {@link #maxYawRate} degrees per tick. */
     private double inputYaw;
+    private boolean climbOnCollision = true;
+    private Vec3 homePosition;
 
     private double maxSpeed = DEFAULT_MAX_SPEED;
     private double acceleration = DEFAULT_ACCELERATION;
@@ -169,6 +171,18 @@ public class DroneEntity extends Entity {
         this.clearTargetOnArrival = clearTargetOnArrival;
     }
 
+    /**
+     * Whether hitting something sideways makes the drone try to rise over it.
+     *
+     * <p>On is right for free flight, where there is nothing but the target to go on. It is wrong
+     * under a route that was planned around the obstruction, because the lift cancels the descent
+     * the route is asking for and the drone hovers against the wall instead of flying through the
+     * gap beside it. A controller that plans turns this off.
+     */
+    public void setClimbOnCollision(boolean climbOnCollision) {
+        this.climbOnCollision = climbOnCollision;
+    }
+
     public double getMaxSpeed() {
         return this.maxSpeed;
     }
@@ -189,6 +203,21 @@ public class DroneEntity extends Entity {
     public void setTurnRates(float maxYawRate, float maxPitchRate) {
         this.maxYawRate = Math.max(0.1F, maxYawRate);
         this.maxPitchRate = Math.max(0.1F, maxPitchRate);
+    }
+
+    /**
+     * Where this drone returns to when it is told to go home.
+     *
+     * <p>Kept on the entity rather than in the controller so it survives a restart, and so a
+     * drone that briefly drops out of the controller's index does not silently adopt whatever
+     * patch of sky it happened to be over as its base.
+     */
+    public Vec3 getHomePosition() {
+        return this.homePosition;
+    }
+
+    public void setHomePosition(Vec3 homePosition) {
+        this.homePosition = homePosition;
     }
 
     /** Free-form label so the Fire Keep server can address one specific drone. */
@@ -260,7 +289,7 @@ public class DroneEntity extends Entity {
                 this.verticalCollision ? blocked.y * 0.2D : blocked.y,
                 this.horizontalCollision ? blocked.z * 0.2D : blocked.z);
 
-        if (this.targetPosition != null && this.horizontalCollision) {
+        if (this.climbOnCollision && this.targetPosition != null && this.horizontalCollision) {
             // Climb over the obstruction: the simplest response that keeps a target reachable.
             damped = damped.add(0.0D, this.maxSpeed * 0.25D, 0.0D);
         }
@@ -406,6 +435,7 @@ public class DroneEntity extends Entity {
         this.targetPitch = input.getFloatOr("TargetPitch", this.getXRot());
         this.yawFollowsMotion = input.getBooleanOr("YawFollowsMotion", true);
         this.clearTargetOnArrival = input.getBooleanOr("ClearTargetOnArrival", true);
+        this.homePosition = input.read("HomePosition", Vec3.CODEC).orElse(null);
         this.setDroneId(input.getStringOr("DroneId", ""));
     }
 
@@ -421,6 +451,7 @@ public class DroneEntity extends Entity {
         output.putFloat("TargetPitch", this.targetPitch);
         output.putBoolean("YawFollowsMotion", this.yawFollowsMotion);
         output.putBoolean("ClearTargetOnArrival", this.clearTargetOnArrival);
+        output.storeNullable("HomePosition", Vec3.CODEC, this.homePosition);
         output.putString("DroneId", this.getDroneId());
     }
 }

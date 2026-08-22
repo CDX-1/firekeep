@@ -1,0 +1,4 @@
+{
+  "command": "scan",
+  "await": true
+}

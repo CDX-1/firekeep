@@ -1,0 +1,5 @@
+{
+  "command": "dispense_water",
+  "radius": 4,
+  "await": true
+}

@@ -1,0 +1,5 @@
+{
+  "command": "follow",
+  "target": "drone_02",
+  "radius": 5
+}

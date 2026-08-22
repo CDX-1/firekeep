@@ -1,0 +1,15 @@
+{
+  "event": "fire_detected",
+  "drone_id": "drone_01",
+  "at": 1787406891635,
+  "hazard": "fire",
+  "size": 9,
+  "severity": "moderate",
+  "direction": "east",
+  "distance": 6.34,
+  "terrain": "settlement",
+  "biome": "minecraft:snowy_taiga",
+  "dimension": "minecraft:overworld",
+  "location": { "x": 4, "y": 71, "z": 0 },
+  "drone_position": { "x": 0.5, "y": 76.42, "z": 0.5 }
+}

@@ -1,0 +1,12 @@
+{
+  "x": 120,
+  "y": 88,
+  "z": -40,
+  "dimension": "minecraft:overworld",
+  "command": {
+    "command": "move_to",
+    "x": 120,
+    "y": 88,
+    "z": -40
+  }
+}

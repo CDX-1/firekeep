@@ -1,0 +1,152 @@
+{
+    "drone_id": "drone_01",
+    "status": "available",
+    "dimension": "minecraft:overworld",
+    "game_time": 23939,
+    "captured_at": 1787407953765,
+    "position": {
+        "x": -12.99,
+        "y": 78.09,
+        "z": -13.12
+    },
+    "velocity": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+    },
+    "home": {
+        "x": 0.5,
+        "y": 76.48,
+        "z": 0.39
+    },
+    "rotation": {
+        "yaw": -94.9,
+        "pitch": 50.53,
+        "facing": "east"
+    },
+    "environment": {
+        "terrain": "dense_forest",
+        "biome": "minecraft:snowy_taiga",
+        "ground": "minecraft:spruce_leaves",
+        "altitude_above_ground": 1,
+        "weather": "clear",
+        "hazard_level": "none",
+        "open_directions": [
+            "north",
+            "southeast",
+            "south",
+            "southwest",
+            "west",
+            "northwest",
+            "up"
+        ],
+        "clearance": {
+            "north": 10,
+            "northeast": 0,
+            "east": 1,
+            "southeast": 10,
+            "south": 6,
+            "southwest": 10,
+            "west": 4,
+            "northwest": 7,
+            "up": 5,
+            "down": 0
+        },
+        "obstacles": [
+            {
+                "type": "spruce_tree",
+                "direction": "northeast",
+                "distance": 2.91,
+                "size": 5,
+                "position": {
+                    "x": -11,
+                    "y": 77,
+                    "z": -15
+                }
+            },
+            {
+                "type": "spruce_tree",
+                "direction": "east",
+                "distance": 6.54,
+                "size": 5,
+                "position": {
+                    "x": -7,
+                    "y": 77,
+                    "z": -13
+                }
+            },
+            {
+                "type": "spruce_tree",
+                "direction": "west",
+                "distance": 6.67,
+                "size": 8,
+                "position": {
+                    "x": -20,
+                    "y": 78,
+                    "z": -15
+                }
+            },
+            {
+                "type": "spruce_tree",
+                "direction": "south",
+                "distance": 8.02,
+                "size": 6,
+                "position": {
+                    "x": -11,
+                    "y": 78,
+                    "z": -6
+                }
+            },
+            {
+                "type": "spruce_tree",
+                "direction": "north",
+                "distance": 8.42,
+                "size": 5,
+                "position": {
+                    "x": -14,
+                    "y": 77,
+                    "z": -22
+                }
+            },
+            {
+                "type": "spruce_tree",
+                "direction": "northwest",
+                "distance": 8.44,
+                "size": 7,
+                "position": {
+                    "x": -19,
+                    "y": 78,
+                    "z": -20
+                }
+            }
+        ],
+        "hazards": [],
+        "resources": [],
+        "block_counts": {
+            "fire": 0,
+            "lava": 0,
+            "water": 0
+        }
+    },
+    "entities": [
+        {
+            "id": "drone_02",
+            "type": "firekeep:drone",
+            "category": "drone",
+            "direction": "east",
+            "distance": 20.69,
+            "on_fire": false,
+            "position": {
+                "x": 7.56,
+                "y": 76.93,
+                "z": -11.02
+            }
+        }
+    ],
+    "local_map": {
+        "radius": 10,
+        "vertical_radius": 5,
+        "legend": "D=drone F=fire L=lava W=water T=tree t=leaves B=building #=terrain o=obstacle !=hazard ,=ground cover ?=unknown .=open  P=player d=other drone x=hostile a=animal. North is the top row, east is to the right, one character per block column.",
+        "grid": "ttt.,,t,ttt,,.....ttT\nttt.,tTttttt,.....ttt\ntttttttttTtt.......tt\ntttttttttttt.......tt\nttttTtt,ttt,.......tt\n..ttttt,,,,,.......tt\n.ttttt,,,.ttttt.....t\nttttttt,,ttttttt.....\nttttttt..ttttttt.....\ntttTttt..tttTttttt...\nttttttt..tDtttttttt.t\nttttttt..tttttttTtttt\n.ttttt....ttttttttttt\n...............ttt.tt\n,...................t\n,.........,,.........\n,,........,ttt......t\n,,,ttt...,ttttt....tT\n,,ttttt.,,ttTtt.....t\n,,ttTtt,,Tttttt,ttttt\n,,ttttttt,,ttt.tttttt"
+    }
+}

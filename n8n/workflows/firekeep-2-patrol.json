@@ -1,0 +1,177 @@
+{
+  "name": "Firekeep 2 \u2014 Keep the fleet patrolling",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 2
+            }
+          ]
+        }
+      },
+      "id": "every-2-minutes",
+      "name": "Every 2 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "f0",
+              "name": "droneApi",
+              "value": "http://127.0.0.1:8090",
+              "type": "string"
+            },
+            {
+              "id": "f1",
+              "name": "patrolSize",
+              "value": "40",
+              "type": "string"
+            },
+            {
+              "id": "f2",
+              "name": "patrolAltitude",
+              "value": "12",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -20,
+        0
+      ],
+      "notes": "patrolSize is the side of the square each drone laps, in blocks. patrolAltitude is how far above its home it flies."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.droneApi }}/api/drones",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "id": "fleet",
+      "name": "Fleet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keeps every free drone moving, because a drone only sees fire it is near.\n// Anything already flying, following or on a mission is left alone.\nconst roster = $json.drones || [];\nconst size = Number($('Config').first().json.patrolSize || 40);\nconst altitude = Number($('Config').first().json.patrolAltitude || 12);\n\nconst out = [];\nfor (const drone of roster) {\n  if (drone.status !== 'available') continue;\n\n  // A square lap around wherever the drone calls home, flown at a height that\n  // clears most trees. loop:true means this is issued once and runs forever.\n  const home = drone.home || drone.position;\n  const y = Math.round(home.y + altitude);\n  const half = size / 2;\n  const waypoints = [\n    { x: Math.round(home.x - half), y, z: Math.round(home.z - half) },\n    { x: Math.round(home.x + half), y, z: Math.round(home.z - half) },\n    { x: Math.round(home.x + half), y, z: Math.round(home.z + half) },\n    { x: Math.round(home.x - half), y, z: Math.round(home.z + half) },\n  ];\n\n  out.push({ json: { drone_id: drone.id, command: { command: 'patrol', loop: true, waypoints } } });\n}\n\nif (out.length === 0) {\n  return [];               // whole fleet is busy; nothing to do this tick\n}\nreturn out;"
+      },
+      "id": "idle-drones",
+      "name": "Idle drones",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.droneApi }}/api/drones/{{ $json.drone_id }}/command",
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.command) }}"
+      },
+      "id": "start-patrol",
+      "name": "Start patrol",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every 2 minutes": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fleet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fleet": {
+      "main": [
+        [
+          {
+            "node": "Idle drones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Idle drones": {
+      "main": [
+        [
+          {
+            "node": "Start patrol",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
