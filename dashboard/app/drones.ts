@@ -1,22 +1,17 @@
-/** The drone roster, shared by the camera wall and the world map. */
-
-export const AREAS = ["Northeast", "Northwest", "Southwest", "Southeast"] as const;
-
-export type Area = (typeof AREAS)[number];
-export type Filter = "All" | Area;
-export type Drone = { name: string; area: Area };
-
-export const DRONES: Drone[] = AREAS.flatMap((area, areaIndex) =>
-  Array.from({ length: 3 }, (_, index) => ({ name: `Drone ${areaIndex * 3 + index + 1}`, area })),
-);
-
 /**
- * Which half of the world an area covers, as fractions of the map bounds.
- * Minecraft's north is -Z and east is +X, so "Northeast" is the +X/-Z corner.
+ * The quadrants the camera wall and the world map both group drones by.
+ *
+ * There is no roster here any more: both tabs take theirs from the running game - the
+ * camera wall from the agents' /camera/drones, the map from the mod's live world feed -
+ * and work out the area from where a drone actually is with `areaOf` in lib/cameras.
+ *
+ * The areas themselves live in lib/types with the rest of the shapes the mod sends, so
+ * there is one list rather than two that can drift apart.
  */
-export const AREA_QUADRANT: Record<Area, { east: boolean; south: boolean }> = {
-  Northeast: { east: true, south: false },
-  Northwest: { east: false, south: false },
-  Southwest: { east: false, south: true },
-  Southeast: { east: true, south: true },
-};
+
+import { DRONE_AREAS, type DroneArea } from "@/lib/types";
+
+export const AREAS = DRONE_AREAS;
+
+export type Area = DroneArea;
+export type Filter = "All" | Area;

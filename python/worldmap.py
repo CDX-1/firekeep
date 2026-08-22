@@ -8,10 +8,12 @@ with vanilla's own map palette and north-facing relief shading. Ungenerated
 chunks stay transparent so the dashboard can tell "nothing there" from "black
 block there".
 
+    python3 worldmap.py ../fabric/run/world -o map.png        # a dedicated server
     python3 worldmap.py ../fabric/run/saves/"New World" -o map.png
 """
 
 import argparse
+import os
 import struct
 import time
 import zlib
@@ -43,15 +45,56 @@ class WorldError(Exception):
 # --------------------------------------------------------------------------
 # save layout
 
+SAVE_ENV = "FIREKEEP_SAVE"
+
+
+def server_world(run):
+    """
+    The world a dedicated server in `run` writes, taken from its level-name.
+
+    A server keeps its one world at run/<level-name>, not under run/saves - so looking
+    only in the singleplayer place finds nothing when the drones are on a server.
+    """
+    name = "world"
+    try:
+        for line in (run / "server.properties").read_text(encoding="utf-8",
+                                                          errors="replace").splitlines():
+            key, sep, value = line.strip().partition("=")
+            if sep and key.strip() == "level-name" and value.strip():
+                name = value.strip()
+                break
+    except OSError:
+        pass
+    return run / name
+
+
+def default_saves():
+    """Every world this checkout might be serving, the server's own first."""
+    run = Path(__file__).resolve().parent.parent / "fabric" / "run"
+    found = []
+
+    world = server_world(run)
+    if (world / "level.dat").is_file():
+        found.append(world)
+
+    saves = run / "saves"
+    if saves.is_dir():
+        found.extend(sorted((d for d in saves.iterdir() if (d / "level.dat").is_file()),
+                            key=lambda d: d.stat().st_mtime, reverse=True))
+    return found
+
+
 def find_save(*hints):
-    """First readable save directory among the hints, or under fabric/run/saves."""
+    """
+    First readable save among the hints, $FIREKEEP_SAVE, or this checkout's run dir.
+
+    Both layouts turn up in development: a dedicated server's run/<level-name>, and a
+    singleplayer client's run/saves/<name>.
+    """
     candidates = [Path(h) for h in hints if h]
     if not candidates:
-        here = Path(__file__).resolve().parent
-        saves = here.parent / "fabric" / "run" / "saves"
-        if saves.is_dir():
-            candidates = sorted((d for d in saves.iterdir() if (d / "level.dat").is_file()),
-                                key=lambda d: d.stat().st_mtime, reverse=True)
+        env = os.environ.get(SAVE_ENV)
+        candidates = [Path(env)] if env else default_saves()
     for c in candidates:
         if (c / "level.dat").is_file():
             return c
@@ -374,7 +417,8 @@ def _crop(pixels, width, height, origin_x, origin_z, min_x, min_z, max_x, max_z)
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("save", nargs="?", help="save folder (default: newest under fabric/run/saves)")
+    ap.add_argument("save", nargs="?", help="world folder (default: the server's world "
+                                            "under fabric/run, else newest in run/saves)")
     ap.add_argument("-d", "--dimension", default="overworld")
     ap.add_argument("-o", "--out", type=Path, default=Path("map.png"))
     args = ap.parse_args()

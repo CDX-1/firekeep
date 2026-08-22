@@ -42,7 +42,7 @@ export const snapshotUrl = (id: string, tick: number) =>
  * Which quarter of the world a drone is flying over, measured from the world origin - in Minecraft
  * north is -Z and east is +X.
  */
-export function areaOf(drone: DroneCamera): DroneArea {
+export function areaOf(drone: { x: number; z: number }): DroneArea {
   const north = drone.z < 0;
   const east = drone.x >= 0;
   if (north) return east ? "Northeast" : "Northwest";

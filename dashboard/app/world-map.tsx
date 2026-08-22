@@ -2,33 +2,28 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import styles from "./world-map.module.css";
-import { AREA_QUADRANT, AREAS, DRONES, type Area } from "./drones";
+import { AREAS, type Area } from "./drones";
 import { getWorld, worldMapUrl } from "@/lib/api";
 import type { WorldMeta } from "@/lib/types";
 import { fallbackWorld } from "./fallback-world";
+import { areaOf } from "@/lib/cameras";
 import { LiveLayer } from "./live-layer";
 import { DIMENSION, getLive, liveMapUrl, sendDroneTo, streamUrl,
          type LiveDelta, type LiveDrone, type LiveSnapshot } from "@/lib/live";
 
 /**
- * Flight feel. A real DroneEntity cruises at 8 blocks/s, which would take a full
- * minute to cross this map, so the markers fly at dashboard speed instead. The
- * shape of the motion is the mod's: velocity chases a demand that tapers off as
- * the target gets close, so they ease in rather than stopping dead.
+ * How fast a marker catches up with the position the mod last reported, per second.
+ *
+ * Nothing here simulates flight: the mod owns where a drone is, and the feed lands about
+ * five times a second. Drawing those samples raw would step visibly at 60fps, so markers
+ * ease towards the newest one. It smooths the way to a real position, never invents one.
  */
-const CRUISE = 95;        // blocks per second
-const RESPONSE = 3.4;     // how fast velocity catches up with the demand, per second
-const BRAKING = 1.7;      // approach speed per block of remaining distance
-const CREEP = 5;          // floor under the approach speed, so arrivals do not crawl
-const ARRIVED = 0.5;      // blocks
+const SMOOTHING = 14;
 
 const MIN_SCALE = 0.12;   // screen pixels per block
 const MAX_SCALE = 12;
 const HIT_RADIUS = 15;    // screen pixels around a marker that count as a grab
 const DRAG_SLOP = 5;      // below this, a drag is really just a click
-
-/** Real drones the mod reports get their own colour, distinct from the mock roster. */
-const LIVE_COLOR = "#e2604a";
 
 const AREA_COLOR: Record<Area, string> = {
   Northeast: "#d0a06a",
@@ -37,20 +32,18 @@ const AREA_COLOR: Record<Area, string> = {
   Southeast: "#6fa8d0",
 };
 
-/** Where an area's three drones start, as offsets from the centre of the map. */
-const SPREAD: readonly (readonly [number, number])[] = [[0.16, 0.30], [0.30, 0.15], [0.42, 0.39]];
-
 type Vec = { x: number; z: number };
 
-type MapDrone = {
-  name: string;
+/** A live drone as it is drawn: the mod's own numbers, eased between feed samples. */
+type Marker = {
+  id: string;
+  /** the quadrant it is actually over, so the rail groups by where drones really are */
   area: Area;
   x: number;
   z: number;
-  vx: number;
-  vz: number;
-  target: Vec | null;
+  /** radians, already turned from the mod's degrees into screen space */
   yaw: number;
+  target: Vec | null;
 };
 
 type View = { x: number; y: number; scale: number };
@@ -66,7 +59,7 @@ export default function WorldMap({ active }: { active: boolean }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<View>({ x: 0, y: 0, scale: 1 });
-  const dronesRef = useRef<MapDrone[]>([]);
+  const markersRef = useRef<Marker[]>([]);
   const dragRef = useRef<Drag | null>(null);
   const hoverRef = useRef<string | null>(null);
   const cursorRef = useRef<{ x: number; y: number } | null>(null);
@@ -79,6 +72,7 @@ export default function WorldMap({ active }: { active: boolean }) {
   const [liveDrones, setLiveDrones] = useState<LiveDrone[]>([]);
   const [backdrop, setBackdrop] = useState<Backdrop | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [orderError, setOrderError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [cursor, setCursor] = useState<Vec | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -172,27 +166,6 @@ export default function WorldMap({ active }: { active: boolean }) {
     return () => window.clearInterval(timer);
   }, []);
 
-  // Drop the drones into their quadrant as soon as we know how big the world is.
-  useEffect(() => {
-    if (!backdrop) return;
-    const { origin_x, origin_z, width, height } = backdrop.meta;
-    dronesRef.current = DRONES.map((drone, index) => {
-      const { east, south } = AREA_QUADRANT[drone.area];
-      // three offsets from the middle of the map, as fractions of its size
-      const [across, along] = SPREAD[index % SPREAD.length];
-      return {
-        ...drone,
-        x: origin_x + width * (0.5 + (east ? across : -across)),
-        z: origin_z + height * (0.5 + (south ? along : -along)),
-        vx: 0,
-        vz: 0,
-        target: null,
-        yaw: south ? Math.PI / 2 : -Math.PI / 2,
-      };
-    });
-    setSelected(null);
-  }, [backdrop]);
-
   // ---------------------------------------------------------------- viewport
 
   const fit = useCallback(() => {
@@ -256,14 +229,13 @@ export default function WorldMap({ active }: { active: boolean }) {
       const dt = Math.min(0.1, (time - last) / 1000);
       last = time;
 
-      fly(dronesRef.current, dt);
+      syncMarkers(markersRef.current, liveRef.current, dt);
       layerRef.current?.flush();
-      draw(canvasRef.current, backdrop, viewRef.current, dronesRef.current, {
+      draw(canvasRef.current, backdrop, viewRef.current, markersRef.current, {
         selected,
         hovered: hoverRef.current,
         drag: dragRef.current,
         layer: layerRef.current,
-        live: liveRef.current,
         time,
       });
 
@@ -309,9 +281,8 @@ export default function WorldMap({ active }: { active: boolean }) {
       }
     };
 
-    // real drones sit on top, so they win a tie against the mock roster
-    for (const drone of dronesRef.current) consider(drone.name, drone.x, drone.z);
-    for (const drone of liveRef.current) consider(drone.id, drone.x, drone.z);
+    // pick against the drawn positions, so a click lands on what is under the cursor
+    for (const marker of markersRef.current) consider(marker.id, marker.x, marker.z);
     return best === null ? null : (best as { name: string }).name;
   }, [backdrop]);
 
@@ -363,21 +334,14 @@ export default function WorldMap({ active }: { active: boolean }) {
     if (drag.kind !== "aim" || drag.moved <= DRAG_SLOP) return;
     const target = toWorld(drag.toX, drag.toY);
 
-    const real = liveRef.current.find((d) => d.id === drag.drone);
-    if (real) {
-      // a real drone is the mod's to move: post the order and let the feed show the result
-      void sendDroneTo(real.id, target.x, real.y, target.z).catch(() => undefined);
-      return;
-    }
+    const drone = liveRef.current.find((d) => d.id === drag.drone);
+    if (!drone) return;
 
-    const drone = dronesRef.current.find((d) => d.name === drag.drone);
-    const meta = backdrop?.meta;
-    if (drone && meta) {
-      drone.target = {
-        x: clamp(target.x, meta.origin_x, meta.origin_x + meta.width - 1),
-        z: clamp(target.z, meta.origin_z, meta.origin_z + meta.height - 1),
-      };
-    }
+    // The drone belongs to the mod: post the order and let the feed show the result. Its
+    // altitude is kept - the map is top-down and has nothing to say about y.
+    setOrderError(null);
+    void sendDroneTo(drone.id, target.x, drone.y, target.z)
+      .catch((cause) => setOrderError(cause instanceof Error ? cause.message : String(cause)));
   };
 
   const onWheel = (event: React.WheelEvent<HTMLCanvasElement>) => {
@@ -411,18 +375,16 @@ export default function WorldMap({ active }: { active: boolean }) {
     };
   }, [backdrop]);
 
-  const centerOn = useCallback((name: string) => {
-    const drone = dronesRef.current.find((d) => d.name === name);
-    if (drone) centerOnPoint(drone.x, drone.z);
-  }, [centerOnPoint]);
-
+  /** Holding is an order to where it already is; the mod clears the target on arrival. */
   const holdSelected = useCallback(() => {
-    const drone = dronesRef.current.find((d) => d.name === selected);
-    if (drone) drone.target = null;
+    const drone = liveRef.current.find((d) => d.id === selected);
+    if (!drone) return;
+    setOrderError(null);
+    void sendDroneTo(drone.id, drone.x, drone.y, drone.z)
+      .catch((cause) => setOrderError(cause instanceof Error ? cause.message : String(cause)));
   }, [selected]);
 
-  const flying = dronesRef.current.filter((drone) => drone.target !== null).length;
-  const selectedDrone = dronesRef.current.find((drone) => drone.name === selected) ?? null;
+  const flying = liveDrones.filter((drone) => drone.target !== null).length;
   const selectedLive = liveDrones.find((drone) => drone.id === selected) ?? null;
   const meta = backdrop?.meta;
 
@@ -484,8 +446,11 @@ export default function WorldMap({ active }: { active: boolean }) {
         {!backdrop && <p className={styles.loading}>Reading the world off disk&hellip;</p>}
         {error && backdrop && !backdrop.real && (
           <p className={styles.notice}>
-            Showing a stand-in world &mdash; the capture server did not answer ({error}).
-            Start <code>python3 server.py</code> and hit Reload.
+            Showing a stand-in world, not the one the drones are in &mdash; {error}. Either
+            <code>python3 server.py</code> is not running, or it found no world to read: it
+            looks for the server&rsquo;s own world under <code>fabric/run</code>, then
+            <code>fabric/run/saves</code>. Point it with <code>--save</code> or
+            <code>FIREKEEP_SAVE</code>, then hit Reload.
           </p>
         )}
       </div>
@@ -495,49 +460,41 @@ export default function WorldMap({ active }: { active: boolean }) {
           <span>Drones</span>
           <span>{flying ? `${flying} in transit` : "all holding"}</span>
         </header>
-        {liveDrones.length > 0 && (
-          <section className={styles.liveSection}>
-            <p className={styles.areaLabel}><i style={{ background: LIVE_COLOR }} />In world</p>
-            <ul>
-              {liveDrones.map((drone) => (
-                <li key={drone.id}>
-                  <button
-                    type="button"
-                    data-active={selected === drone.id}
-                    onClick={() => { setSelected(drone.id); centerOnPoint(drone.x, drone.z); }}
-                  >
-                    <span>{drone.id}</span>
-                    <span className={styles.coords}>{Math.round(drone.x)}, {Math.round(drone.z)}</span>
-                    {drone.target && <span className={styles.transit} aria-label="in transit" />}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </section>
+        {liveDrones.length === 0 && (
+          <p className={styles.empty}>
+            {feed?.live
+              ? "No drones in the world yet. Spawn one with /drone spawn."
+              : "Waiting for the mod\u2019s world feed."}
+          </p>
         )}
         <ul>
-          {AREAS.map((area) => (
-            <li key={area}>
-              <p className={styles.areaLabel}><i style={{ background: AREA_COLOR[area] }} />{area}</p>
-              <ul>
-                {dronesRef.current.filter((drone) => drone.area === area).map((drone) => (
-                  <li key={drone.name}>
-                    <button
-                      type="button"
-                      data-active={selected === drone.name}
-                      onClick={() => { setSelected(drone.name); centerOn(drone.name); }}
-                    >
-                      <span>{drone.name}</span>
-                      <span className={styles.coords}>
-                        {Math.round(drone.x)}, {Math.round(drone.z)}
-                      </span>
-                      {drone.target && <span className={styles.transit} aria-label="in transit" />}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </li>
-          ))}
+          {AREAS.map((area) => {
+            // grouped by the quadrant each drone is actually over, so this follows them
+            const inArea = liveDrones.filter((drone) => areaOf(drone) === area);
+            if (inArea.length === 0) return null;
+            return (
+              <li key={area}>
+                <p className={styles.areaLabel}><i style={{ background: AREA_COLOR[area] }} />{area}</p>
+                <ul>
+                  {inArea.map((drone) => (
+                    <li key={drone.id}>
+                      <button
+                        type="button"
+                        data-active={selected === drone.id}
+                        onClick={() => { setSelected(drone.id); centerOnPoint(drone.x, drone.z); }}
+                      >
+                        <span>{drone.id}</span>
+                        <span className={styles.coords}>
+                          {Math.round(drone.x)}, {Math.round(drone.z)}
+                        </span>
+                        {drone.target && <span className={styles.transit} aria-label="in transit" />}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            );
+          })}
         </ul>
         <footer>
           {selectedLive ? (
@@ -548,17 +505,10 @@ export default function WorldMap({ active }: { active: boolean }) {
                   ? `flying to ${Math.round(selectedLive.target[0])}, ${Math.round(selectedLive.target[2])}`
                   : `holding at y ${Math.round(selectedLive.y)}`}
               </p>
-              <p className={styles.coords}>Drag it on the map to send it somewhere.</p>
-            </>
-          ) : selectedDrone ? (
-            <>
-              <p>{selectedDrone.name}</p>
-              <p className={styles.coords}>
-                {selectedDrone.target
-                  ? `flying to ${Math.round(selectedDrone.target.x)}, ${Math.round(selectedDrone.target.z)}`
-                  : "holding position"}
-              </p>
-              <button type="button" onClick={holdSelected} disabled={!selectedDrone.target}>Hold</button>
+              <button type="button" onClick={holdSelected} disabled={!selectedLive.target}>Hold</button>
+              {orderError
+                ? <p className={styles.orderError}>Order failed: {orderError}</p>
+                : <p className={styles.coords}>Drag it on the map to send it somewhere.</p>}
             </>
           ) : (
             <p className={styles.coords}>Pick a drone, or drag one on the map.</p>
@@ -570,46 +520,45 @@ export default function WorldMap({ active }: { active: boolean }) {
 }
 
 // --------------------------------------------------------------------------
-// simulation
+// markers
 
-function fly(drones: MapDrone[], dt: number) {
-  for (const drone of drones) {
-    let demandX = 0;
-    let demandZ = 0;
+/**
+ * Brings the drawn markers in line with what the mod last reported.
+ *
+ * A drone that has just appeared is placed exactly where the feed says; one already on the
+ * map eases towards its new position, because the feed lands about five times a second and
+ * the canvas redraws sixty. Drones that left the world drop off the map with it.
+ *
+ * The array is updated in place: the render loop holds it in a ref across frames.
+ */
+function syncMarkers(markers: Marker[], live: LiveDrone[], dt: number) {
+  const chase = 1 - Math.exp(-SMOOTHING * dt);
+  const existing = new Map(markers.map((marker) => [marker.id, marker]));
+  const next: Marker[] = [];
 
-    if (drone.target) {
-      const ex = drone.target.x - drone.x;
-      const ez = drone.target.z - drone.z;
-      const distance = Math.hypot(ex, ez);
-      if (distance <= ARRIVED) {
-        drone.x = drone.target.x;
-        drone.z = drone.target.z;
-        drone.vx = 0;
-        drone.vz = 0;
-        drone.target = null;
-        continue;
-      } else {
-        const speed = Math.min(CRUISE, distance * BRAKING + CREEP);
-        demandX = (ex / distance) * speed;
-        demandZ = (ez / distance) * speed;
-      }
-    }
+  for (const drone of live) {
+    const area = areaOf(drone);
+    // the mod reports degrees, with 0 facing south; the marker is drawn nose-up
+    const yaw = (drone.yaw - 90) * Math.PI / 180;
+    const target = drone.target ? { x: drone.target[0], z: drone.target[2] } : null;
 
-    const chase = 1 - Math.exp(-RESPONSE * dt);
-    drone.vx += (demandX - drone.vx) * chase;
-    drone.vz += (demandZ - drone.vz) * chase;
-
-    const speed = Math.hypot(drone.vx, drone.vz);
-    if (speed < 0.02) {
-      drone.vx = 0;
-      drone.vz = 0;
+    const marker = existing.get(drone.id);
+    if (!marker) {
+      next.push({ id: drone.id, area, x: drone.x, z: drone.z, yaw, target });
       continue;
     }
 
-    drone.x += drone.vx * dt;
-    drone.z += drone.vz * dt;
-    drone.yaw = Math.atan2(drone.vz, drone.vx);
+    marker.area = area;
+    marker.target = target;
+    marker.x += (drone.x - marker.x) * chase;
+    marker.z += (drone.z - marker.z) * chase;
+    // turn the short way round, so passing due north does not spin the marker
+    marker.yaw += Math.atan2(Math.sin(yaw - marker.yaw), Math.cos(yaw - marker.yaw)) * chase;
+    next.push(marker);
   }
+
+  markers.length = 0;
+  markers.push(...next);
 }
 
 // --------------------------------------------------------------------------
@@ -620,11 +569,10 @@ type Overlay = {
   hovered: string | null;
   drag: Drag | null;
   layer: LiveLayer | null;
-  live: LiveDrone[];
   time: number;
 };
 
-function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, drones: MapDrone[], overlay: Overlay) {
+function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, markers: Marker[], overlay: Overlay) {
   if (!canvas) return;
   const stage = canvas.parentElement;
   if (!stage) return;
@@ -675,39 +623,26 @@ function draw(canvas: HTMLCanvasElement | null, backdrop: Backdrop, view: View, 
   // drag arrow first, so markers sit on top of it
   const aim = overlay.drag?.kind === "aim" ? overlay.drag : null;
   if (aim && aim.moved > DRAG_SLOP) {
-    const drone = drones.find((d) => d.name === aim.drone);
-    if (drone) {
-      const blocks = Math.hypot(aim.toX - toScreenX(drone.x), aim.toY - toScreenY(drone.z)) / view.scale;
-      drawArrow(ctx, toScreenX(drone.x), toScreenY(drone.z), aim.toX, aim.toY, AREA_COLOR[drone.area], blocks);
+    const marker = markers.find((m) => m.id === aim.drone);
+    if (marker) {
+      const blocks = Math.hypot(aim.toX - toScreenX(marker.x), aim.toY - toScreenY(marker.z)) / view.scale;
+      drawArrow(ctx, toScreenX(marker.x), toScreenY(marker.z), aim.toX, aim.toY, AREA_COLOR[marker.area], blocks);
     }
   }
 
-  for (const drone of overlay.live) {
-    const x = toScreenX(drone.x);
-    const y = toScreenY(drone.z);
+  for (const marker of markers) {
+    const x = toScreenX(marker.x);
+    const y = toScreenY(marker.z);
     if (x < -60 || y < -60 || x > width + 60 || y > height + 60) continue;
-    if (drone.target) {
-      drawRoute(ctx, x, y, toScreenX(drone.target[0]), toScreenY(drone.target[2]), LIVE_COLOR);
+
+    const color = AREA_COLOR[marker.area];
+    if (marker.target) {
+      drawRoute(ctx, x, y, toScreenX(marker.target.x), toScreenY(marker.target.z), color);
     }
-    drawDrone(ctx, x, y, { name: drone.id, yaw: (drone.yaw - 90) * Math.PI / 180 }, LIVE_COLOR, {
-      selected: overlay.selected === drone.id,
-      hovered: overlay.hovered === drone.id,
+    drawDrone(ctx, x, y, { name: marker.id, yaw: marker.yaw }, color, {
+      selected: overlay.selected === marker.id,
+      hovered: overlay.hovered === marker.id,
       labelled: true,
-    });
-  }
-
-  for (const drone of drones) {
-    const x = toScreenX(drone.x);
-    const y = toScreenY(drone.z);
-    if (x < -60 || y < -60 || x > width + 60 || y > height + 60) continue;
-
-    if (drone.target) {
-      drawRoute(ctx, x, y, toScreenX(drone.target.x), toScreenY(drone.target.z), AREA_COLOR[drone.area]);
-    }
-    drawDrone(ctx, x, y, drone, AREA_COLOR[drone.area], {
-      selected: overlay.selected === drone.name,
-      hovered: overlay.hovered === drone.name,
-      labelled: overlay.selected === drone.name || overlay.hovered === drone.name || view.scale > 0.9,
     });
   }
 }

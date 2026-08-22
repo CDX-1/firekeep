@@ -545,7 +545,8 @@ def main():
     ap.add_argument("--watch-dir", type=Path, action="append", default=[],
                     metavar="DIR", help="extra folder to watch (repeatable)")
     ap.add_argument("--save", type=Path, default=None, metavar="DIR",
-                    help="Minecraft save to map (default: newest under fabric/run/saves)")
+                    help="Minecraft world to map (default: $FIREKEEP_SAVE, else the server's "
+                         "world under fabric/run, else the newest fabric/run/saves world)")
     ap.add_argument("--dry-run", action="store_true",
                     help="accept captures but never call the API - for wiring up the mod")
     ap.add_argument("--workers", type=int, default=1, help="concurrent generations")
@@ -583,7 +584,8 @@ def main():
     print(f"  POST    http://{args.host}:{args.port}/capture  (raw PNG body)")
     print(f"  renders {RENDERS}  (newest also at {LATEST})")
     if httpd.save is None:
-        print("  world   no save found - GET /api/world will 404")
+        print("  world   no world found - GET /api/world will 404 and the map falls back "
+              "to a stand-in; pass --save or set FIREKEEP_SAVE")
     else:
         print(f"  world   {httpd.save}  ->  GET /api/world, /api/world/map.png")
     if args.watch or args.watch_dir:
