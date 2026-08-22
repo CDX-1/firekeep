@@ -24,15 +24,17 @@
 .viewport:hover { border-color: var(--muted); }
 .viewport:focus-visible, .viewerArrow:focus-visible, .sidebarToggle:focus-visible, .allDrones:focus-visible, .areaSelect:focus-visible, .droneList button:focus-visible { outline: 1px solid var(--text); outline-offset: -2px; }
 .emptyImage { display: flex; width: 100%; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 9px; color: var(--muted); }
-.viewport .emptyImage { aspect-ratio: 1; }
+.viewport .emptyImage { aspect-ratio: 16 / 9; }
 .emptyImage svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.25; }
 .emptyImage span { font-size: 11px; line-height: 1; }
+.feedImage { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.notice { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 12px; }
 .feed p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.2; }
 
 .overlay { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 44px 76px; background: rgba(0, 0, 0, .82); }
 .viewer { display: grid; grid-template-columns: 44px minmax(0, min(76vw, calc(100dvh - 160px))) 44px; align-items: center; gap: 18px; width: fit-content; max-width: 100%; }
 .viewerPanel { overflow: hidden; border: 1px solid var(--muted); background: var(--image-bg); }
-.viewerImage { aspect-ratio: 1; }
+.viewerImage { aspect-ratio: 16 / 9; }
 .viewerPanel p { margin: 0; padding: 9px 11px; color: var(--muted); font-size: 11px; background: var(--bg); }
 .viewerArrow { width: 44px; height: 44px; display: grid; place-items: center; padding: 0; color: var(--text); background: rgba(24, 24, 24, .94); border: 1px solid var(--line); cursor: pointer; }
 .viewerArrow:hover { border-color: var(--muted); }

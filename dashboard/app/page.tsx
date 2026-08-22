@@ -1,39 +1,43 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import styles from "./page.module.css";
+import { MAX_LIVE_TILES, ROSTER_INTERVAL_MS, TILE_INTERVAL_MS, areaOf, getDrones, snapshotUrl, streamUrl } from "../lib/cameras";
+import { DRONE_AREAS, type DroneArea, type DroneCamera } from "../lib/types";
 
-const AREAS = ["Northeast", "Northwest", "Southwest", "Southeast"] as const;
-type Area = (typeof AREAS)[number];
-type Filter = "All" | Area;
-type Drone = { name: string; area: Area };
-
-const DRONES: Drone[] = AREAS.flatMap((area, areaIndex) =>
-  Array.from({ length: 3 }, (_, index) => ({ name: `Drone ${areaIndex * 3 + index + 1}`, area })),
-);
+type Filter = "All" | DroneArea;
+type Drone = DroneCamera & { area: DroneArea };
 
 export default function Dashboard() {
+  const { drones, offline } = useDroneRoster();
   const [activeFilter, setActiveFilter] = useState<Filter>("All");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [selectedDrone, setSelectedDrone] = useState<Drone | null>(null);
-  const visibleDrones = activeFilter === "All" ? DRONES : DRONES.filter((drone) => drone.area === activeFilter);
-  const selectedIndex = selectedDrone ? visibleDrones.findIndex((drone) => drone.name === selectedDrone.name) : -1;
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const visibleDrones = activeFilter === "All" ? drones : drones.filter((drone) => drone.area === activeFilter);
+  const selectedIndex = selectedId ? visibleDrones.findIndex((drone) => drone.id === selectedId) : -1;
+  const selectedDrone = selectedIndex >= 0 ? visibleDrones[selectedIndex] : null;
 
   const selectArea = (area: Filter) => {
     setActiveFilter(area);
-    setSelectedDrone(null);
+    setSelectedId(null);
   };
 
   const moveViewer = (offset: number) => {
     if (selectedIndex < 0) return;
-    setSelectedDrone(visibleDrones[(selectedIndex + offset + visibleDrones.length) % visibleDrones.length]);
+    setSelectedId(visibleDrones[(selectedIndex + offset + visibleDrones.length) % visibleDrones.length].id);
   };
+
+  // A drone that lands or is removed takes its viewer down with it.
+  useEffect(() => {
+    if (selectedId && selectedIndex < 0) setSelectedId(null);
+  }, [selectedId, selectedIndex]);
 
   useEffect(() => {
     if (!selectedDrone) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSelectedDrone(null);
+      if (event.key === "Escape") setSelectedId(null);
       if (event.key === "ArrowLeft") moveViewer(-1);
       if (event.key === "ArrowRight") moveViewer(1);
     };
@@ -58,20 +62,20 @@ export default function Dashboard() {
           </button>
           {!sidebarCollapsed && <nav className={styles.regionList}>
             <button className={styles.allDrones} data-active={activeFilter === "All"} type="button" onClick={() => selectArea("All")}>
-              <span>All</span><span>{DRONES.length}</span>
+              <span>All</span><span>{drones.length}</span>
             </button>
-            {AREAS.map((area) => {
-              const areaDrones = DRONES.filter((drone) => drone.area === area);
+            {DRONE_AREAS.map((area) => {
+              const areaDrones = drones.filter((drone) => drone.area === area);
               return <section className={styles.area} key={area}>
                 <button className={styles.areaSelect} data-active={activeFilter === area} type="button" onClick={() => selectArea(area)}>
                   <span>{area}</span><span>{areaDrones.length}</span>
                 </button>
                 <div className={styles.droneList}>
                   {areaDrones.map((drone) => (
-                    <button key={drone.name} type="button" onClick={() => {
+                    <button key={drone.id} type="button" onClick={() => {
                       setActiveFilter(area);
-                      setSelectedDrone(drone);
-                    }}>{drone.name}</button>
+                      setSelectedId(drone.id);
+                    }}>{drone.id}</button>
                   ))}
                 </div>
               </section>;
@@ -80,28 +84,37 @@ export default function Dashboard() {
         </aside>
 
         <section className={styles.grid} aria-label="Drone camera feeds">
-          {visibleDrones.map((drone) => (
-            <article className={styles.feed} key={drone.name}>
-              <button className={styles.viewport} type="button" aria-label={`Open ${drone.name} feed`} onClick={() => setSelectedDrone(drone)}>
-                <EmptyImage />
+          {visibleDrones.map((drone, index) => (
+            <article className={styles.feed} key={drone.id}>
+              <button className={styles.viewport} type="button" aria-label={`Open ${drone.id} feed`} onClick={() => setSelectedId(drone.id)}>
+                <TileFeed id={drone.id} live={index < MAX_LIVE_TILES && selectedId === null} />
               </button>
-              <p>{drone.name}</p>
+              <p>{drone.id}</p>
             </article>
           ))}
+          {visibleDrones.length === 0 && (
+            <p className={styles.notice}>
+              {offline
+                ? "Waiting for the Minecraft client - no camera server on /camera yet."
+                : activeFilter === "All"
+                  ? "No drones in the air. Spawn one with /drone spawn."
+                  : `No drones over the ${activeFilter.toLowerCase()}.`}
+            </p>
+          )}
         </section>
       </div>
 
       {selectedDrone && (
-        <div className={styles.overlay} role="dialog" aria-modal="true" aria-label={`${selectedDrone.name} feed`} onMouseDown={(event) => {
-          if (event.target === event.currentTarget) setSelectedDrone(null);
+        <div className={styles.overlay} role="dialog" aria-modal="true" aria-label={`${selectedDrone.id} feed`} onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setSelectedId(null);
         }}>
           <div className={styles.viewer}>
             <button className={styles.viewerArrow} type="button" aria-label="Previous drone feed" onClick={() => moveViewer(-1)}>
               <Chevron direction="left" />
             </button>
             <div className={styles.viewerPanel}>
-              <div className={styles.viewerImage}><EmptyImage /></div>
-              <p>{selectedDrone.name}</p>
+              <div className={styles.viewerImage}><LiveFeed id={selectedDrone.id} /></div>
+              <p>{selectedDrone.id} - {Math.round(selectedDrone.x)}, {Math.round(selectedDrone.y)}, {Math.round(selectedDrone.z)}</p>
             </div>
             <button className={styles.viewerArrow} type="button" aria-label="Next drone feed" onClick={() => moveViewer(1)}>
               <Chevron direction="right" />
@@ -110,6 +123,109 @@ export default function Dashboard() {
         </div>
       )}
     </main>
+  );
+}
+
+/** Polls the mod for the live roster, so drones appear and disappear on their own. */
+function useDroneRoster() {
+  const [drones, setDrones] = useState<Drone[]>([]);
+  const [offline, setOffline] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+
+    const poll = async () => {
+      try {
+        const roster = await getDrones(controller.signal);
+        if (cancelled) return;
+        setDrones(roster.map((drone) => ({ ...drone, area: areaOf(drone) })));
+        setOffline(false);
+      } catch {
+        if (cancelled) return;
+        setDrones([]);
+        setOffline(true);
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, ROSTER_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearInterval(timer);
+    };
+  }, []);
+
+  return { drones, offline };
+}
+
+/**
+ * A grid tile.
+ *
+ * <p>The first few tiles get a real MJPEG stream and move as fast as the agent renders. The rest
+ * poll single frames, because a browser only allows six connections to one origin and the roster
+ * poll and the expanded viewer need some of those. Tiles give up their stream entirely while the
+ * expanded viewer is open, so the drone somebody is actually looking at gets the connection.
+ */
+function TileFeed({ id, live }: { id: string; live: boolean }) {
+  const [tick, setTick] = useState(0);
+  const [hasFrame, setHasFrame] = useState(false);
+  const image = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    setHasFrame(false);
+  }, [id, live]);
+
+  useEffect(() => {
+    if (live) {
+      // Dropping the src is what actually closes the connection when this tile stops streaming.
+      const element = image.current;
+      return () => element?.setAttribute("src", "");
+    }
+    const timer = setInterval(() => setTick((value) => value + 1), TILE_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [id, live]);
+
+  return (
+    <>
+      {!hasFrame && <EmptyImage />}
+      <img
+        ref={image}
+        className={styles.feedImage}
+        style={hasFrame ? undefined : { display: "none" }}
+        src={live ? streamUrl(id) : snapshotUrl(id, tick)}
+        alt={`${id} camera`}
+        onLoad={() => setHasFrame(true)}
+      />
+    </>
+  );
+}
+
+/** The expanded viewer: one long-lived MJPEG response, decoded by the browser as it arrives. */
+function LiveFeed({ id }: { id: string }) {
+  const image = useRef<HTMLImageElement>(null);
+  const [hasFrame, setHasFrame] = useState(false);
+
+  useEffect(() => {
+    setHasFrame(false);
+    const element = image.current;
+    // Dropping the src is what actually closes the connection when the viewer moves on.
+    return () => element?.setAttribute("src", "");
+  }, [id]);
+
+  return (
+    <>
+      {!hasFrame && <EmptyImage />}
+      <img
+        ref={image}
+        className={styles.feedImage}
+        style={hasFrame ? undefined : { display: "none" }}
+        src={streamUrl(id)}
+        alt={`${id} camera`}
+        onLoad={() => setHasFrame(true)}
+      />
+    </>
   );
 }
 

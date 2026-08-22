@@ -19,3 +19,9 @@ hs_err_pid*
 
 # Common working directory
 run
+
+# Machine-specific agent launch classpath, regenerated per machine
+.agent
+
+# Per-agent Minecraft game directories, created by AgentSupervisor
+run-agent-*

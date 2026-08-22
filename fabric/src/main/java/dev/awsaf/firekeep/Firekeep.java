@@ -1,5 +1,8 @@
 package dev.awsaf.firekeep;
 
+import dev.awsaf.firekeep.agent.AgentDirectoryServer;
+import dev.awsaf.firekeep.agent.AgentSupervisor;
+import dev.awsaf.firekeep.agent.DroneAgents;
 import dev.awsaf.firekeep.command.DroneCommand;
 import dev.awsaf.firekeep.entity.FirekeepEntities;
 import net.fabricmc.api.ModInitializer;
@@ -19,6 +22,9 @@ public class Firekeep implements ModInitializer {
     @Override
     public void onInitialize() {
         FirekeepEntities.initialize();
+        DroneAgents.initialize();
+        AgentSupervisor.initialize();
+        AgentDirectoryServer.initialize();
 
         CommandRegistrationCallback.EVENT.register((dispatcher, buildContext, selection) ->
                 DroneCommand.register(dispatcher));

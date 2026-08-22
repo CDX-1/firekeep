@@ -4,6 +4,12 @@
   "package": "dev.awsaf.firekeep.mixin.client",
   "compatibilityLevel": "JAVA_25",
   "client": [
+    "AgentRenderMixin",
+    "AgentThrottleMixin",
+    "CameraAccessor",
+    "GameRendererAccessor",
+    "GuiExtractMixin",
+    "MinecraftFrameMixin"
   ],
   "injectors": {
     "defaultRequire": 1

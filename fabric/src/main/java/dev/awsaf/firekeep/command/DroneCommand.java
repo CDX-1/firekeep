@@ -5,6 +5,8 @@ import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import dev.awsaf.firekeep.agent.AgentSupervisor;
+import dev.awsaf.firekeep.agent.DroneAgents;
 import dev.awsaf.firekeep.entity.DroneEntity;
 import dev.awsaf.firekeep.entity.FirekeepEntities;
 import net.minecraft.commands.CommandSourceStack;
@@ -13,6 +15,7 @@ import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 
@@ -31,6 +34,11 @@ import java.util.List;
  * /drone stop &lt;drones&gt;
  * /drone remove &lt;drones&gt;
  * /drone list
+ * /drone agent &lt;player&gt; &lt;droneId&gt;
+ * /drone agent clear &lt;player&gt;
+ * /drone agent deploy &lt;droneId&gt;
+ * /drone agent undeploy &lt;droneId&gt;
+ * /drone agent status
  * </pre>
  */
 public final class DroneCommand {
@@ -85,6 +93,49 @@ public final class DroneCommand {
                         .then(Commands.argument("drones", EntityArgument.entities())
                                 .executes(ctx -> forEachDrone(ctx, drone -> drone.discard(),
                                         count -> "Removed " + count + " drone(s)"))))
+                .then(Commands.literal("agent")
+                        .then(Commands.literal("deploy")
+                                .then(Commands.argument("droneId", StringArgumentType.word())
+                                        .executes(ctx -> {
+                                            String reply = AgentSupervisor.deploy(
+                                                    StringArgumentType.getString(ctx, "droneId"));
+                                            ctx.getSource().sendSuccess(() -> Component.literal(reply), true);
+                                            return 1;
+                                        })))
+                        .then(Commands.literal("undeploy")
+                                .then(Commands.argument("droneId", StringArgumentType.word())
+                                        .executes(ctx -> {
+                                            String reply = AgentSupervisor.undeploy(
+                                                    StringArgumentType.getString(ctx, "droneId"));
+                                            ctx.getSource().sendSuccess(() -> Component.literal(reply), true);
+                                            return 1;
+                                        })))
+                        .then(Commands.literal("status")
+                                .executes(ctx -> {
+                                    for (String line : AgentSupervisor.status()) {
+                                        ctx.getSource().sendSuccess(() -> Component.literal("  " + line), false);
+                                    }
+                                    return 1;
+                                }))
+                        .then(Commands.literal("clear")
+                                .then(Commands.argument("player", EntityArgument.player())
+                                        .executes(ctx -> {
+                                            ServerPlayer player = EntityArgument.getPlayer(ctx, "player");
+                                            DroneAgents.clear(player);
+                                            ctx.getSource().sendSuccess(() -> Component.literal(
+                                                    "Released agent " + player.getGameProfile().name()), true);
+                                            return 1;
+                                        })))
+                        .then(Commands.argument("player", EntityArgument.player())
+                                .then(Commands.argument("droneId", StringArgumentType.word())
+                                        .executes(ctx -> {
+                                            ServerPlayer player = EntityArgument.getPlayer(ctx, "player");
+                                            String droneId = StringArgumentType.getString(ctx, "droneId");
+                                            DroneAgents.assign(player, droneId);
+                                            ctx.getSource().sendSuccess(() -> Component.literal(
+                                                    player.getGameProfile().name() + " is now filming " + droneId), true);
+                                            return 1;
+                                        }))))
                 .then(Commands.literal("list")
                         .executes(ctx -> list(ctx.getSource()))));
     }

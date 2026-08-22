@@ -260,6 +260,10 @@ public class DroneEntity extends Entity {
         double horizontalSpeed = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
         if (this.yawFollowsMotion && horizontalSpeed > 0.01D) {
             desiredYaw = (float) (Mth.atan2(velocity.z, velocity.x) * (180.0D / Math.PI)) - 90.0F;
+            // Hold this heading once the drone stops. Without remembering it, arriving drops the
+            // yaw back to whatever was last set by hand - usually the spawn yaw - and the drone
+            // turns away from the shot on its own the moment it settles.
+            this.targetYaw = Mth.wrapDegrees(desiredYaw);
         }
 
         this.setYRot(Mth.approachDegrees(this.getYRot(), desiredYaw, this.maxYawRate));

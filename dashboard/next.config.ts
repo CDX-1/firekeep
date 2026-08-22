@@ -9,8 +9,12 @@ const nextConfig: NextConfig = {
   // pin the root, otherwise a stray lockfile further up the tree wins
   turbopack: { root: path.resolve(__dirname) },
 
+  // /camera/* is no longer a rewrite: with a fleet of agents there is no single camera host to
+  // point at, so app/camera/drones/* resolves each drone to its own agent and proxies it.
   async rewrites() {
-    return [{ source: "/backend/:path*", destination: `${SERVER}/:path*` }];
+    return [
+      { source: "/backend/:path*", destination: `${SERVER}/:path*` },
+    ];
   },
 };
 

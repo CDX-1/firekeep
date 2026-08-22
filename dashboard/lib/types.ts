@@ -1,3 +1,27 @@
+/** Mirrors the roster the Fabric mod's camera server serves at /drones. */
+
+export const DRONE_AREAS = ["Northeast", "Northwest", "Southwest", "Southeast"] as const;
+export type DroneArea = (typeof DRONE_AREAS)[number];
+
+export interface DroneCamera {
+  /** The drone's id in game, or drone-<entity id> for one that was never named. */
+  id: string;
+  entityId: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  /** Dashboards currently holding the stream open. */
+  viewers: number;
+  width: number;
+  height: number;
+  fps: number;
+  /** Whether a frame arrived in the last few seconds. */
+  live: boolean;
+  /** Frames captured since the drone appeared. */
+  frames: number;
+}
+
 /** Mirrors the job record that server.py writes to out/jobs/<id>/job.json. */
 
 export type JobStatus = "queued" | "generating" | "done" | "failed";
