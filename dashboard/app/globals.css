@@ -1,10 +1,13 @@
 :root {
   color-scheme: dark;
   --bg: #101010;
-  --image-bg: #181818;
-  --line: #303030;
+  --image-bg: #171717;
+  --line: rgba(255, 255, 255, .11);
   --text: #e8e8e8;
   --muted: #969696;
+  --accent: #8fb8ae;
+  --accent-soft: rgba(143, 184, 174, .13);
+  --warm: #d0a06a;
 }
 
 * { box-sizing: border-box; }
@@ -14,7 +17,7 @@ html, body { padding: 0; margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.5 Arial, Helvetica, sans-serif;
+  font: 13px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
