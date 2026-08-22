@@ -88,11 +88,14 @@ def main():
             "assets": saved, "caption": (world.get("assets") or {}).get("caption"),
             "error": None, "took_seconds": round(time.time() - t0, 1),
         }
+        job["result_png"] = server.publish_result(job, saved)
         (d / "job.json").write_text(json.dumps(job, indent=2))
 
         print(f"\ndone in {time.time()-t0:.0f}s -> {world.get('world_marble_url')}")
         for k, v in saved.items():
             print(f"{k:8} -> {d / v}")
+        if job["result_png"]:
+            print(f"{'render':8} -> {job['result_png']}")
         print("\nview it:  python3 server.py")
     except marble.MarbleError as e:
         sys.exit(f"! {e}")
