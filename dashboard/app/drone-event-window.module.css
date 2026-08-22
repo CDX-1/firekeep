@@ -5,6 +5,8 @@
 .list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 9px; padding: 7px 8px; border-top: 1px solid rgba(225, 232, 227, .1); border-left: 3px solid #8d9a93; }
 .list li[data-severity="low"], .list li[data-severity="medium"] { border-left-color: #c9a35c; }
 .list li[data-severity="high"], .list li[data-severity="critical"] { border-left-color: #d66d5c; }
+.list li[data-call="true"] { border-left-color: #d9c26a; background: rgba(217, 194, 106, .08); }
+.list li[data-call="true"] .type { color: #e6d389; }
 .type { color: #e5ebe7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message { grid-column: 1 / -1; overflow: hidden; color: #b7c1bb; text-overflow: ellipsis; white-space: nowrap; }
 .location { color: #9ea9a2; font-variant-numeric: tabular-nums; }
