@@ -1,11 +1,10 @@
 :root {
   color-scheme: dark;
-  --bg: #0b0d10;
-  --panel: #12161c;
-  --line: rgba(255, 255, 255, 0.09);
-  --text: #e6e8eb;
-  --dim: #8b93a1;
-  --accent: #7dd3fc;
+  --bg: #101010;
+  --image-bg: #181818;
+  --line: #303030;
+  --text: #e8e8e8;
+  --muted: #969696;
 }
 
 * { box-sizing: border-box; }
@@ -15,20 +14,8 @@ html, body { padding: 0; margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 14px/1.5 Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-a { color: var(--accent); }
-
-button {
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  background: #1a1f27;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 7px 12px;
-}
-button:hover:not(:disabled) { border-color: rgba(255, 255, 255, 0.22); }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
+button { font: inherit; }
